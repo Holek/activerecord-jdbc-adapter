@@ -67,6 +67,9 @@ module ArJdbc
             if (start_row == 1) && (end_row ==1)
               new_sql = "#{select} TOP 1 #{rest_of_query} #{new_order}"
               sql.replace(new_sql)
+            elsif offset == 0
+              new_sql = "#{select} TOP #{limit} #{rest_of_query} #{new_order}"
+              sql.replace(new_sql)
             else
               # We are in deep trouble here. SQL Server does not have any kind of OFFSET build in.
               # Only remaining solution is adding a where condition to be sure that the ID is not in SELECT TOP OFFSET FROM SAME_QUERY.
@@ -75,7 +78,8 @@ module ArJdbc
               additional_condition = "#{table_name}.#{primary_key} NOT IN (#{select} TOP #{offset} #{table_name}.#{primary_key} #{query_without_select} #{new_order})"
 
               # Extract the different parts of the query
-              having, group_by, where, from, selection = split_sql(rest_of_query, /having/i, /group by/i, /where/i, /from/i)
+              # The (?!.*something) is regex black magic voodoo to take the last matching bit in the string
+              having, group_by, where, from, selection = split_sql(rest_of_query, /having(?!.*having)/i, /group by(?!.*group by)/i, /where(?!.*where)/i, /from/i)
 
               # Update the where part to add our additional condition
               if where.blank?
