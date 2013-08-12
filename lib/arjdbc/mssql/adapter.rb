@@ -438,7 +438,7 @@ module ArJdbc
       # IE. "SELECT 1" or "SELECT * FROM someFunction()".
       return default if table_name.blank?
 
-      table_name = unquote_table_name(table_name)
+      table_name = Utils.unquote_table_name(table_name)
 
       return default if table_name =~ SKIP_COLUMNS_TABLE_NAMES_RE
 
