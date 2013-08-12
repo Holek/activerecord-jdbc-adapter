@@ -1,6 +1,8 @@
 module ActiveRecord
   module ConnectionAdapters
+    
     module JdbcConnectionPoolCallbacks
+      
       def self.included(base)
         if base.respond_to?(:set_callback) # Rails 3 callbacks
           base.set_callback :checkin, :after, :on_checkin
@@ -11,10 +13,6 @@ module ActiveRecord
         end
       end
 
-      def self.needed?
-        ActiveRecord::Base.respond_to?(:connection_pool)
-      end
-
       def on_checkin
         # default implementation does nothing
       end
@@ -22,13 +20,15 @@ module ActiveRecord
       def on_checkout
         # default implementation does nothing
       end
+      
     end
 
     module JndiConnectionPoolCallbacks
-      def self.prepare(adapter, conn)
-        if ActiveRecord::Base.respond_to?(:connection_pool) && conn.jndi_connection?
-          adapter.extend self
-          conn.disconnect! # disconnect initial connection in JdbcConnection#initialize
+      
+      def self.prepare(adapter, connection)
+        if adapter.is_a?(JdbcConnectionPoolCallbacks) && connection.jndi?
+          adapter.extend self # extend JndiConnectionPoolCallbacks
+          connection.disconnect! # disconnect initial (JNDI) connection if any
         end
       end
 
@@ -40,5 +40,6 @@ module ActiveRecord
         reconnect!
       end
     end
+    
   end
 end

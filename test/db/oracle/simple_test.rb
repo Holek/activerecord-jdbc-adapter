@@ -15,6 +15,8 @@ class OracleSimpleTest < Test::Unit::TestCase
   end
   
   def test_default_id_type_is_integer
+    user = User.create! :login => 'id_type'
+    Entry.create! :title => 'first', :user_id => user.id
     assert Integer === Entry.first.id
   end
 
@@ -61,6 +63,54 @@ class OracleSimpleTest < Test::Unit::TestCase
   end if Test::Unit::TestCase.ar_version('3.1') # no binds argument for <= 3.0
   
   include ExplainSupportTestMethods if ar_version("3.1")
+
+  def test_quotes_reserved_word_column
+    connection.create_table 'lusers', :force => true do |t|
+      t.string :file
+      t.text "desc", :limit => 16777216
+      t.date :'date', :null => false
+    end
+  ensure
+    connection.drop_table('lusers') rescue nil
+  end
+  
+  def test_emulates_booleans_by_default
+    assert_true ArJdbc::Oracle.emulate_booleans
+    # assert_true ActiveRecord::ConnectionAdapters::OracleAdapter.emulate_booleans
+  end if ar_version('3.0')
+
+  def test_boolean_emulation_can_be_disabled
+    db_type = DbType.create! :sample_boolean => true
+    column = DbType.columns.find { |col| col.name.to_s == 'sample_boolean' }
+    assert_equal :boolean, column.type
+    ArJdbc::Oracle.emulate_booleans = false
+    
+    DbType.reset_column_information
+    column = DbType.columns.find { |col| col.name.to_s == 'sample_boolean' }
+    assert_equal :integer, column.type
+    
+    assert_equal 1, db_type.reload.sample_boolean
+  ensure
+    ArJdbc::Oracle.emulate_booleans = true
+    DbType.reset_column_information
+  end if ar_version('3.0')
+  
+  def test_set_table_name_prefixed_with_schema
+    schema = connection.config[:username]
+    activity = Class.new(ActiveRecord::Base) do # class Activity
+      if respond_to?(:table_name=)
+        self.table_name = "#{schema}.activities"
+        self.sequence_name = "#{schema}.activities_seq"
+      else
+        set_table_name "#{schema}.activities"
+        set_sequence_name "#{schema}.activities_seq"
+      end
+    end
+    connection.create_table(:activities) { |t| t.string :name }
+    assert activity.create! :name => 'an-activity' # Activity.create! ...
+  ensure
+    connection.drop_table(:activities) rescue nil
+  end
   
   protected
 

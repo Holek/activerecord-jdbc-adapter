@@ -8,6 +8,13 @@ class DerbySimpleTest < Test::Unit::TestCase
   include ActiveRecord3TestMethods
   include CustomSelectTestMethods
   
+  # @override
+  def test_empty_insert_statement
+    # "INSERT INTO table VALUES ( DEFAULT ) " not supported by Derby DB
+    pend if ar_version('4.0')
+    super
+  end
+  
   # Check that a table-less VALUES(xxx) query (like SELECT  works.
   def test_values
     value = nil
@@ -28,7 +35,7 @@ class DerbySimpleTest < Test::Unit::TestCase
   end
 
   def test_text_and_string_conversions
-    e = DbType.first
+    e = DbType.create!(:sample_string => '', :sample_text => '').reload
 
     # Derby will normally reject any non text value.
     # The adapter has been patched to convert non text values to strings
@@ -122,7 +129,8 @@ class DerbySimpleTest < Test::Unit::TestCase
       ["sample_integer_neg_default",  :integer,   { :default => -1 }],
       ["sample_text",                 :text,      { }],
       ["big_decimal",                 :integer,   { :precision => 31, :scale => 0 }],
-    ].sort{|a,b| a[0] <=> b[0]}
+      ["decimal_with_scale",          :decimal,   { :precision => 15, :scale => 3 }],
+    ].sort{ |a,b| a[0] <=> b[0] }
 
     column_names = (expected_types.map{|et| et[0]} + DbType.column_names).sort.uniq
     result = []

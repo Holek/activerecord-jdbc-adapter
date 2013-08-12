@@ -12,7 +12,9 @@ ArJdbc::ConnectionMethods.module_eval do
     config[:host] ||= "localhost"
     config[:port] ||= 1433
     config[:driver] ||= defined?(::Jdbc::JTDS.driver_name) ? ::Jdbc::JTDS.driver_name : 'net.sourceforge.jtds.jdbc.Driver'
-    config[:adapter_spec] = ::ArJdbc::MSSQL
+    config[:adapter_spec] ||= ::ArJdbc::MSSQL
+    config[:adapter_class] = ActiveRecord::ConnectionAdapters::MSSQLAdapter unless config.key?(:adapter_class)
+    config[:connection_alive_sql] ||= 'SELECT 1'
 
     config[:url] ||= begin
       url = "jdbc:jtds:sqlserver://#{config[:host]}:#{config[:port]}/#{config[:database]}"

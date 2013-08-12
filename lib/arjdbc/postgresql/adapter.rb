@@ -1,3 +1,5 @@
+ArJdbc.load_java_part :PostgreSQL
+
 require 'ipaddr'
 require 'arjdbc/postgresql/column_cast'
 require 'arjdbc/postgresql/explain_support'
@@ -6,10 +8,6 @@ module ArJdbc
   module PostgreSQL
     
     AR4_COMPAT = ::ActiveRecord::VERSION::MAJOR > 3 unless const_defined?(:AR4_COMPAT) # :nodoc:
-    
-    def self.extended(base)
-      base.configure_connection
-    end
 
     def self.column_selector
       [ /postgre/i, lambda { |cfg, column| column.extend(::ArJdbc::PostgreSQL::Column) } ]
@@ -18,13 +16,21 @@ module ArJdbc
     def self.jdbc_connection_class
       ::ActiveRecord::ConnectionAdapters::PostgreSQLJdbcConnection
     end
-    
+
+    def set_client_encoding(encoding)
+      ActiveRecord::Base.logger.warn "client_encoding is set by the driver and should not be altered, ('#{encoding}' ignored)"
+      ActiveRecord::Base.logger.debug "Set the 'allowEncodingChanges' driver property (e.g. using config[:properties]) if you need to override the client encoding when doing a copy."
+    end
+
     # Configures the encoding, verbosity, schema search path, and time zone of the connection.
     # This is called by #connect and should not be called manually.
     def configure_connection
-      if encoding = config[:encoding]
-        self.set_client_encoding(encoding)
-      end
+      #if encoding = config[:encoding]
+        # The client_encoding setting is set by the driver and should not be altered.
+        # If the driver detects a change it will abort the connection.
+        # see http://jdbc.postgresql.org/documentation/91/connect.html
+        # self.set_client_encoding(encoding)
+      #end
       self.client_min_messages = config[:min_messages] || 'warning'
       self.schema_search_path = config[:schema_search_path] || config[:schema_order]
 
@@ -53,9 +59,9 @@ module ArJdbc
     end
 
     # constants taken from postgresql_adapter in rails project
-    ADAPTER_NAME = 'PostgreSQL'
+    ADAPTER_NAME = 'PostgreSQL'.freeze
 
-    def adapter_name #:nodoc:
+    def adapter_name # :nodoc:
       ADAPTER_NAME
     end
 
@@ -66,6 +72,16 @@ module ArJdbc
         'pg' => ::Arel::Visitors::PostgreSQL
       }
     end
+    
+    def new_visitor(config = nil)
+      visitor = ::Arel::Visitors::PostgreSQL
+      ( prepared_statements? ? visitor : bind_substitution(visitor) ).new(self)
+    end if defined? ::Arel::Visitors::PostgreSQL
+    
+    # @see #bind_substitution
+    class BindSubstitution < Arel::Visitors::PostgreSQL # :nodoc:
+      include Arel::Visitors::BindVisitor
+    end if defined? Arel::Visitors::BindVisitor
 
     def postgresql_version
       @postgresql_version ||=
@@ -182,6 +198,7 @@ module ArJdbc
         when :cidr, :inet then self.class.string_to_cidr value
         when :macaddr then value
         when :tsvector then value
+        when :datetime, :timestamp then self.class.string_to_time value
         else
           case sql_type
           when 'money'
@@ -415,13 +432,13 @@ module ArJdbc
         return super(value, column) unless 'bytea' == column.sql_type
         value # { :value => value, :format => 1 }
       when Array
-        return super(value, column) unless column.array
+        return super(value, column) unless column.array?
         column_class = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
         column_class.array_to_string(value, column, self)
       when NilClass
-        if column.array && array_member
+        if column.array? && array_member
           'NULL'
-        elsif column.array
+        elsif column.array?
           value
         else
           super(value, column)
@@ -579,7 +596,11 @@ module ArJdbc
     def supports_index_sort_order? # :nodoc:
       true
     end
-    
+
+    def supports_partial_index?
+      true
+    end if AR4_COMPAT
+
     # Range datatypes weren't introduced until PostgreSQL 9.2
     def supports_ranges? # :nodoc:
       postgresql_version >= 90200
@@ -592,7 +613,11 @@ module ArJdbc
     def supports_transaction_isolation?(level = nil)
       true
     end
-    
+
+    def index_algorithms
+      { :concurrently => 'CONCURRENTLY' }
+    end
+
     def create_savepoint
       execute("SAVEPOINT #{current_savepoint_name}")
     end
@@ -991,36 +1016,27 @@ module ArJdbc
       sql.replace "SELECT * FROM (#{sql}) AS id_list ORDER BY #{order}"
     end
 
-    def quote(value, column = nil) #:nodoc:
+    def quote(value, column = nil) # :nodoc:
       return super unless column
-
-      # TODO recent 4.0 (master) seems to be passing a ColumnDefinition here :
-      #   NoMethodError: undefined method `sql_type' for #<ActiveRecord::ConnectionAdapters::PostgreSQLAdapter::ColumnDefinition:0x634f6b>
-      # .../activerecord-jdbc-adapter/lib/arjdbc/postgresql/adapter.rb:1014:in `quote'
-      # .../gems/rails-817e8fad5a84/activerecord/lib/active_record/connection_adapters/abstract/schema_statements.rb:698:in `add_column_options!'
-      # .../activerecord-jdbc-adapter/lib/arjdbc/postgresql/adapter.rb:507:in `add_column_options!'
-      # .../gems/rails-817e8fad5a84/activerecord/lib/active_record/connection_adapters/abstract_adapter.rb:168:in `add_column_options!'
-      # .../gems/rails-817e8fad5a84/activerecord/lib/active_record/connection_adapters/abstract_adapter.rb:135:in `visit_ColumnDefinition'
-      sql_type = column.sql_type rescue nil
       
       case value
       when Float
-        if value.infinite? && column.type == :datetime
+        if value.infinite? && ( column.type == :datetime || column.type == :timestamp )
           "'#{value.to_s.downcase}'"
         elsif value.infinite? || value.nan?
           "'#{value.to_s}'"
-        else
-          super
+        else super
         end
       when Numeric
-        return super unless sql_type == 'money'
-        # Not truly string input, so doesn't require (or allow) escape string syntax.
-        ( column.type == :string || column.type == :text ) ? "'#{value}'" : super
+        if column.respond_to?(:sql_type) && column.sql_type == 'money'
+          # not truly string input, so doesn't require (or allow) escape syntax :
+          ( column.type == :string || column.type == :text ) ? "'#{value}'" : super
+        else super
+        end
       when String
-        case sql_type
-        when 'bytea' then "E'#{escape_bytea(value)}'::bytea" # "'#{escape_bytea(value)}'"
-        when 'xml'   then "xml '#{quote_string(value)}'"
-        when /^bit/
+        return "E'#{escape_bytea(value)}'::bytea" if column.type == :binary
+        return "xml '#{quote_string(value)}'" if column.type == :xml
+        if column.respond_to?(:sql_type) && column.sql_type[0, 3] == 'bit'
           case value
           # NOTE: as reported with #60 this is not quite "right" :
           #  "0103" will be treated as hexadecimal string
@@ -1031,34 +1047,31 @@ module ArJdbc
           when /^[01]*$/      then "B'#{value}'" # Bit-string notation
           when /^[0-9A-F]*$/i then "X'#{value}'" # Hexadecimal notation
           end
-        else
-          super
+        else super
         end
       when Array
-        if column.array && AR4_COMPAT
+        if AR4_COMPAT && column.array? # will be always falsy in AR < 4.0
           column_class = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
           "'#{column_class.array_to_string(value, column, self)}'"
-        else
-          super
+        else super
         end
       when Hash
-        if sql_type == 'hstore' && AR4_COMPAT
+        if column.type == :hstore # only in AR-4.0
           column_class = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
           super(column_class.hstore_to_string(value), column)
-        elsif sql_type == 'json' && AR4_COMPAT
+        elsif column.type == :json # only in AR-4.0
           column_class = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
           super(column_class.json_to_string(value), column)
         else super
         end
       when Range
-        if /range$/ =~ sql_type && AR4_COMPAT
+        if column.type.to_s[-5..-1] == 'range' # :'xxxrange' only in AR-4.0
           column_class = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
-          "'#{column_class.range_to_string(value)}'::#{sql_type}"
-        else
-          super
+          "'#{column_class.range_to_string(value)}'::#{column.sql_type}"
+        else super
         end
       when IPAddr
-        if (sql_type == 'inet' || sql_type == 'cidr') && AR4_COMPAT
+        if column.type == :inet || column.type == :cidr # only in AR-4.0
           column_class = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
           super(column_class.cidr_to_string(value), column)
         else super
@@ -1100,7 +1113,11 @@ module ArJdbc
         "#{quote_column_name(schema)}.#{quote_column_name(table_name)}"
       end
     end
-    
+
+    def quote_table_name_for_assignment(table, attr)
+      quote_column_name(attr)
+    end if ::ActiveRecord::VERSION::MAJOR > 3
+
     def quote_column_name(name)
       %("#{name.to_s.gsub("\"", "\"\"")}")
     end
@@ -1205,7 +1222,12 @@ module ArJdbc
       rename_column_indexes(table_name, column_name, new_column_name) if respond_to?(:rename_column_indexes) # AR-4.0 SchemaStatements
     end
 
-    def remove_index!(table_name, index_name) #:nodoc:
+    def add_index(table_name, column_name, options = {}) # :nodoc:
+      index_name, index_type, index_columns, index_options, index_algorithm, index_using = add_index_options(table_name, column_name, options)
+      execute "CREATE #{index_type} INDEX #{index_algorithm} #{quote_column_name(index_name)} ON #{quote_table_name(table_name)} #{index_using} (#{index_columns})#{index_options}"
+    end if AR4_COMPAT
+
+    def remove_index!(table_name, index_name) # :nodoc:
       execute "DROP INDEX #{quote_table_name(index_name)}"
     end
 
@@ -1224,7 +1246,11 @@ module ArJdbc
         notnull = notnull == 't' if notnull.is_a?(String) # JDBC gets true/false
         # for ID columns we get a bit of non-sense default :
         # e.g. "nextval('mixed_cases_id_seq'::regclass"
-        default = nil if default =~ /^nextval\(.*?\:\:regclass\)$/
+        if default =~ /^nextval\(.*?\:\:regclass\)$/
+          default = nil
+        elsif default =~ /^\(([-+]?[\d\.]+)\)$/ # e.g. "(-1)" for a negative default
+          default = $1
+        end
         klass.new(name, default, oid, type, ! notnull)
       end
     end
@@ -1252,9 +1278,9 @@ module ArJdbc
     
     def tables(name = nil)
       select_values(<<-SQL, 'SCHEMA')
-          SELECT tablename
-          FROM pg_tables
-          WHERE schemaname = ANY (current_schemas(false))
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = ANY (current_schemas(false))
       SQL
     end
 
@@ -1265,7 +1291,7 @@ module ArJdbc
       binds = [[ nil, table.gsub(/(^"|"$)/,'') ]]
       binds << [ nil, schema ] if schema
       
-      exec_raw_query(<<-SQL, 'SCHEMA', binds).first["table_count"] > 0
+      exec_query_raw(<<-SQL, 'SCHEMA', binds).first["table_count"] > 0
         SELECT COUNT(*) as table_count
         FROM pg_tables
         WHERE tablename = ?
@@ -1314,15 +1340,24 @@ module ArJdbc
           WHERE a.attrelid = #{oid}
           AND a.attnum IN (#{indkey.join(",")})
         SQL
-        
+
         columns = Hash[ columns.each { |column| column[0] = column[0].to_s } ]
         column_names = columns.values_at(*indkey).compact
 
-        # add info on sort order for columns (only desc order is explicitly specified, asc is the default)
-        desc_order_columns = inddef.scan(/(\w+) DESC/).flatten
-        orders = desc_order_columns.any? ? Hash[ desc_order_columns.map { |column| [column, :desc] } ] : {}
-        
-        column_names.empty? ? nil : IndexDefinition.new(table_name, index_name, unique, column_names, [], orders)
+        unless column_names.empty?
+          # add info on sort order for columns (only desc order is explicitly specified, asc is the default)
+          desc_order_columns = inddef.scan(/(\w+) DESC/).flatten
+          orders = desc_order_columns.any? ? Hash[ desc_order_columns.map { |column| [column, :desc] } ] : {}
+
+          if ActiveRecord::VERSION::MAJOR > 3 # AR4 supports `where` and `using` index options
+            where = inddef.scan(/WHERE (.+)$/).flatten[0]
+            using = inddef.scan(/USING (.+?) /).flatten[0].to_sym
+
+            IndexDefinition.new(table_name, index_name, unique, column_names, [], orders, where, nil, using)
+          else
+            IndexDefinition.new(table_name, index_name, unique, column_names, [], orders)
+          end
+        end
       end
       result.compact!
       result
@@ -1400,13 +1435,15 @@ module ActiveRecord::ConnectionAdapters
   class PostgreSQLColumn < JdbcColumn
     include ArJdbc::PostgreSQL::Column
     
-    def initialize(name, default, oid_type, sql_type = nil, null = true)
+    def initialize(name, default, oid_type = nil, sql_type = nil, null = true)
+      # NOTE: we support AR <= 3.2 : (name, default, sql_type = nil, null = true)
+      null, sql_type, oid_type = !! sql_type, oid_type, nil unless oid_type.is_a?(Integer)
       @oid_type = oid_type
       if sql_type =~ /\[\]$/
-        @array = true
+        @array = true if respond_to?(:array)
         super(name, default, sql_type[0..sql_type.length - 3], null)
       else
-        @array = false
+        @array = false if respond_to?(:array)
         super(name, default, sql_type, null)
       end
     end
@@ -1418,7 +1455,7 @@ module ActiveRecord::ConnectionAdapters
   class PostgreSQLAdapter < JdbcAdapter
     include ArJdbc::PostgreSQL
     include ArJdbc::PostgreSQL::ExplainSupport
-
+    
     def initialize(*args)
       super
       
@@ -1426,7 +1463,7 @@ module ActiveRecord::ConnectionAdapters
       @local_tz = nil
       @table_alias_length = nil
       
-      configure_connection
+      # configure_connection happens in super
 
       @local_tz = execute('SHOW TIME ZONE', 'SCHEMA').first["TimeZone"]
       @use_insert_returning = config.key?(:insert_returning) ? 
@@ -1517,9 +1554,7 @@ module ActiveRecord::ConnectionAdapters
         # NOTE: <= 3.1 no #new_column_definition hard-coded ColumnDef.new :
         # column = self[name] || ColumnDefinition.new(@base, name, type)
         # thus we simply do not support array column definitions on <= 3.1
-        if column.is_a?(ColumnDefinition)
-          column.array = options[:array]
-        end
+        column.array = options[:array] if column.is_a?(ColumnDefinition)
         self
       end
 
@@ -1588,6 +1623,3 @@ module ActiveRecord::ConnectionAdapters
     
   end
 end
-
-# Don't need to load native postgres adapter
-$LOADED_FEATURES << 'active_record/connection_adapters/postgresql_adapter.rb'

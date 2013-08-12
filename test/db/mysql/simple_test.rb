@@ -21,8 +21,7 @@ class MysqlSimpleTest < Test::Unit::TestCase
   def test_column_class_instantiation
     text_column = nil
     assert_nothing_raised do
-      text_column = ActiveRecord::ConnectionAdapters::MysqlColumn.
-        new("title", nil, "text")
+      text_column = ActiveRecord::ConnectionAdapters::MysqlAdapter::Column.new("title", nil, "text")
     end
     assert_not_nil text_column
   end
@@ -105,7 +104,11 @@ class MysqlSimpleTest < Test::Unit::TestCase
     begin
       User.table_name  = "#{database}.users"
       Entry.table_name = "#{database}.entries"
-      assert_not_empty Entry.all(:include => :user)
+      if ar_version('4.0')
+        assert_not_empty Entry.includes(:user).to_a
+      else
+        assert_not_empty Entry.all(:include => :user)
+      end
     ensure
       Entry.table_name = old_entries_table_name
       User.table_name  = old_users_table_name
@@ -129,6 +132,52 @@ class MysqlSimpleTest < Test::Unit::TestCase
     assert_equal 2, rows_affected
     assert_equal 'updated content', e1.reload.content
     assert_equal 'updated content', e2.reload.content
+  end
+  
+  # NOTE: expected escape processing to be disabled by default for non-prepared statements
+  def test_quoting_braces
+    e = Entry.create! :title => '{'
+    assert_equal "{", e.reload.title
+    e = Entry.create! :title => '{}'
+    assert_equal "{}", e.reload.title
+    
+    e = Entry.create! :title => "\\'{}{"
+    assert_equal "\\'{}{", e.reload.title
+    
+    e = Entry.create! :title => '}{"\'}  \''
+    assert_equal "}{\"'}  '", e.reload.title
+  end
+
+  def test_emulates_booleans_by_default
+    assert connection.class.emulate_booleans
+    assert_true ArJdbc::MySQL.emulate_booleans
+    assert_true ActiveRecord::ConnectionAdapters::MysqlAdapter.emulate_booleans
+  end if ar_version('3.0')
+
+  def test_boolean_emulation_can_be_disabled
+    db_type = DbType.create! :sample_boolean => true
+    column = DbType.columns.find { |col| col.name.to_s == 'sample_boolean' }
+    assert_equal :boolean, column.type
+    ActiveRecord::ConnectionAdapters::MysqlAdapter.emulate_booleans = false
+    
+    DbType.reset_column_information
+    column = DbType.columns.find { |col| col.name.to_s == 'sample_boolean' }
+    assert_equal :integer, column.type
+    
+    assert_equal 1, db_type.reload.sample_boolean
+  ensure
+    ArJdbc::MySQL.emulate_booleans = true
+    DbType.reset_column_information
+  end if ar_version('3.0')
+  
+  def test_pk_and_sequence_for
+    assert_equal [ 'id', nil ], connection.pk_and_sequence_for('entries')
+  end
+  
+  def test_mysql_indexes
+    if ar_version('4.0')
+      assert connection.class.const_defined?(:INDEX_TYPES)
+    end
   end
   
 end

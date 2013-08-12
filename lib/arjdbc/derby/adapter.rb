@@ -1,3 +1,4 @@
+ArJdbc.load_java_part :Derby
 require 'arjdbc/jdbc/missing_functionality_helper'
 
 module ArJdbc
@@ -5,10 +6,9 @@ module ArJdbc
 
     def self.extended(adapter)
       require 'arjdbc/derby/active_record_patch'
-      adapter.configure_connection
     end
 
-    def self.included(*args)
+    def self.included(base)
       require 'arjdbc/derby/active_record_patch'
     end
 
@@ -160,6 +160,10 @@ module ArJdbc
       super
     end
 
+    def empty_insert_statement_value
+      'VALUES ( DEFAULT )' # won't work as Derby does need to know the columns count
+    end
+    
     # Set the sequence to the max value of the table's column.
     def reset_sequence!(table, column, sequence = nil)
       mpk = select_value("SELECT MAX(#{quote_column_name(column)}) FROM #{quote_table_name(table)}")
@@ -195,7 +199,7 @@ module ArJdbc
     end
 
     def execute(sql, name = nil, binds = [])
-      sql = to_sql(sql)
+      sql = to_sql(sql, binds)
       if sql =~ /\A\s*(UPDATE|INSERT)/i
         if ( i = sql =~ /\sWHERE\s/im )
           where_part = sql[i..-1]; sql = sql.dup
@@ -230,69 +234,6 @@ module ArJdbc
       sql = "DISTINCT #{columns}, #{order_columns * ', '}"
       sql
     end
-
-    SIZEABLE = %w(VARCHAR CLOB BLOB) # :nodoc:
-
-    def structure_dump # :nodoc:
-      definition = ""
-      meta_data = @connection.connection.meta_data
-      tables_rs = meta_data.getTables(nil, nil, nil, ["TABLE"].to_java(:string))
-      while tables_rs.next
-        table_name = tables_rs.getString(3)
-        definition << "CREATE TABLE #{table_name} (\n"
-        columns_rs = meta_data.getColumns(nil, nil, table_name, nil)
-        first_col = true
-        while columns_rs.next
-          column_name = add_quotes(columns_rs.getString(4));
-          default = ''
-          d1 = columns_rs.getString(13)
-          if d1 =~ /^GENERATED_/
-            default = auto_increment_stmt(table_name, column_name)
-          elsif d1
-            default = " DEFAULT #{d1}"
-          end
-
-          type = columns_rs.getString(6)
-          column_size = columns_rs.getString(7)
-          nulling = (columns_rs.getString(18) == 'NO' ? " NOT NULL" : "")
-          create_column = add_quotes(expand_double_quotes(strip_quotes(column_name)))
-          create_column << " #{type}"
-          create_column << ( SIZEABLE.include?(type) ? "(#{column_size})" : "" )
-          create_column << nulling
-          create_column << default
-          
-          create_column = first_col ? " #{create_column}" : ",\n #{create_column}"
-          definition << create_column
-
-          first_col = false
-        end
-        definition << ");\n\n"
-      end
-      definition
-    end
-
-    AUTO_INC_STMT2 = "" + 
-    "SELECT AUTOINCREMENTSTART, AUTOINCREMENTINC, COLUMNNAME, REFERENCEID, COLUMNDEFAULT " + 
-    "FROM SYS.SYSCOLUMNS WHERE REFERENCEID = " + 
-    "(SELECT T.TABLEID FROM SYS.SYSTABLES T WHERE T.TABLENAME = '%s') AND COLUMNNAME = '%s'"
-    
-    def auto_increment_stmt(tname, cname)
-      stmt = AUTO_INC_STMT2 % [ tname, strip_quotes(cname) ]
-      if data = execute(stmt).first
-        if start = data['autoincrementstart']
-          coldef = ""
-          coldef << " GENERATED " << (data['columndefault'].nil? ? "ALWAYS" : "BY DEFAULT ")
-          coldef << "AS IDENTITY (START WITH "
-          coldef << start
-          coldef << ", INCREMENT BY "
-          coldef << data['autoincrementinc']
-          coldef << ")"
-          return coldef
-        end
-      end
-      ""
-    end
-    private :auto_increment_stmt
     
     def remove_column(table_name, *column_names) # :nodoc:
       for column_name in column_names.flatten
@@ -354,13 +295,20 @@ module ArJdbc
     def tables
       @connection.tables(nil, derby_schema)
     end
+    
+    def recreate_database(name = nil, options = {}) # :nodoc:
+      drop_database(name)
+      create_database(name, options)
+    end
+    
+    def create_database(name = nil, options = {}); end # :nodoc:
 
-    def recreate_database(db_name, options = {})
-      tables.each { |table| drop_table table }
+    def drop_database(name = nil) # :nodoc:
+      tables.each { |table| drop_table(table) }
     end
 
     def quote_column_name(name) # :nodoc:
-      %Q{"#{name.to_s.upcase.gsub(/\"/, '""')}"}
+      %Q{"#{name.to_s.upcase.gsub('"', '""')}"}
     end
 
     def add_limit_offset!(sql, options) # :nodoc:
@@ -370,22 +318,6 @@ module ArJdbc
     end
 
     private
-    
-    def add_quotes(name)
-      return name unless name
-      %Q{"#{name}"}
-    end
-
-    def strip_quotes(str)
-      return str unless str
-      return str unless /^(["']).*\1$/ =~ str
-      str[1..-2]
-    end
-
-    def expand_double_quotes(name)
-      return name unless name && name['"']
-      name.gsub('"', '""')
-    end
     
     # Derby appears to define schemas using the username
     def derby_schema

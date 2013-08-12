@@ -1,51 +1,40 @@
-require 'arjdbc/jdbc/serialized_attributes_helper'
+ArJdbc.load_java_part :DB2
 
 module ArJdbc
   module DB2
-    
-    # TODO kind of standard AR configuration option for this would be nice :
-    ADD_LOB_CALLBACK = true unless const_defined?(:ADD_LOB_CALLBACK) # :nodoc
 
-    @@_lob_callback_added = nil
-    def self.lob_callback_added? # :nodoc
-      @@_lob_callback_added
-    end
+    # This adapter doesn't support explain
+    # config.active_record.auto_explain_threshold_in_seconds should be commented before rails 4.0
     
-    def self.lob_callback_added! # :nodoc
-      @@_lob_callback_added = true
-    end
-
-    def explain(query, *binds)
-      # TODO: Explain this! Do not remove !
-    end
+    def self.extended(adapter); initialize!; end
     
-    def self.extended(base)
-      if ADD_LOB_CALLBACK && ! lob_callback_added?
-        ActiveRecord::Base.class_eval do
-          def after_save_with_db2_lob
-            lob_columns = self.class.columns.select { |c| c.sql_type =~ /blob|clob/i }
-            lob_columns.each do |column|
-              value = ::ArJdbc::SerializedAttributesHelper.dump_column_value(self, column)
-              next if value.nil? # already set NULL
+    @@_initialized = nil
+    
+    def self.initialize!
+      return if @@_initialized; @@_initialized = true
+      
+      require 'arjdbc/jdbc/serialized_attributes_helper'
+      ActiveRecord::Base.class_eval do
+        def after_save_with_db2_lob
+          lob_columns = self.class.columns.select { |c| c.sql_type =~ /blob|clob/i }
+          lob_columns.each do |column|
+            value = ::ArJdbc::SerializedAttributesHelper.dump_column_value(self, column)
+            next if value.nil? # already set NULL
 
-              connection.write_large_object(
-                column.type == :binary, column.name, 
-                self.class.table_name, 
-                self.class.primary_key, 
-                quote_value(id), value
-              )
-            end
+            self.class.connection.write_large_object(
+              column.type == :binary, column.name, 
+              self.class.table_name, 
+              self.class.primary_key, 
+              self.class.connection.quote(id), value
+            )
           end
-          alias after_save_with_db2zos_blob after_save_with_db2_lob # <-compat
         end
-        # TODO this should be changed to :after_save_with_db2_lob :
-        ActiveRecord::Base.after_save :after_save_with_db2zos_blob # <-compat
-        lob_callback_added!
       end
+      ActiveRecord::Base.after_save :after_save_with_db2_lob
     end
     
     def self.column_selector
-      [ /(db2|as400|zos)/i, lambda { |cfg, column| column.extend(::ArJdbc::DB2::Column) } ]
+      [ /(db2|zos)/i, lambda { |cfg, column| column.extend(::ArJdbc::DB2::Column) } ]
     end
 
     def self.jdbc_connection_class
@@ -54,10 +43,17 @@ module ArJdbc
 
     def self.arel2_visitors(config)
       require 'arel/visitors/db2'
-      { 'db2'   => ::Arel::Visitors::DB2, 'as400' => ::Arel::Visitors::DB2 }
+      { 'db2' => ::Arel::Visitors::DB2 }
     end
     
-    ADAPTER_NAME = 'DB2'
+    def self.handle_lobs?; true; end
+    
+    def configure_connection
+      schema = self.schema
+      set_schema(schema) if schema && schema != config[:username]
+    end
+    
+    ADAPTER_NAME = 'DB2'.freeze
     
     def adapter_name
       ADAPTER_NAME
@@ -75,28 +71,41 @@ module ArJdbc
       :decimal    => { :name => "decimal" },
       :char       => { :name => "char" },
       :decfloat   => { :name => "decfloat" },
-      #:rowid      => { :name => "rowid" }, # supported datatype on z/OS and i/5
-      #:graphic    => { :name => "graphic", :limit => 1 },
-      #:vargraphic => { :name => "vargraphic", :limit => 1 },
-      # TODO datetime / timestamp / time mapping
+      :rowid      => { :name => "rowid" }, # rowid is a supported datatype on z/OS and i/5
+      :serial     => { :name => "serial" }, # supported datatype on Informix Dynamic Server
+      :graphic    => { :name => "graphic", :limit => 1 },
+      :vargraphic => { :name => "vargraphic", :limit => 1 },
+      :datetime   => { :name => "timestamp" },
+      :timestamp  => { :name => "timestamp" },
+      :time       => { :name => "time" }
     }
 
     def native_database_types
       super.merge(NATIVE_DATABASE_TYPES)
     end
 
+    @@emulate_booleans = true
+    
+    # Boolean emulation can be disabled using :
+    # 
+    #   ArJdbc::DB2.emulate_booleans = false
+    # 
+    def self.emulate_booleans; @@emulate_booleans; end
+    def self.emulate_booleans=(emulate); @@emulate_booleans = emulate; end
+    
     module Column
+      
       def type_cast(value)
         return nil if value.nil? || value == 'NULL' || value =~ /^\s*NULL\s*$/i
         case type
         when :string    then value
-        when :integer   then defined?(value.to_i) ? value.to_i : (value ? 1 : 0)
-        when :primary_key then defined?(value.to_i) ? value.to_i : (value ? 1 : 0)
+        when :integer   then value.respond_to?(:to_i) ? value.to_i : (value ? 1 : 0)
+        when :primary_key then value.respond_to?(:to_i) ? value.to_i : (value ? 1 : 0)
         when :float     then value.to_f
-        when :datetime  then ArJdbc::DB2::Column.cast_to_date_or_time(value)
-        when :date      then ArJdbc::DB2::Column.cast_to_date_or_time(value)
-        when :timestamp then ArJdbc::DB2::Column.cast_to_time(value)
-        when :time      then ArJdbc::DB2::Column.cast_to_time(value)
+        when :datetime  then Column.cast_to_date_or_time(value)
+        when :date      then Column.cast_to_date_or_time(value)
+        when :timestamp then Column.cast_to_time(value)
+        when :time      then Column.cast_to_time(value)
         # TODO AS400 stores binary strings in EBCDIC (CCSID 65535), need to convert back to ASCII
         else
           super
@@ -144,21 +153,26 @@ module ArJdbc
       # http://publib.boulder.ibm.com/infocenter/db2luw/v9r7/topic/com.ibm.db2.luw.apdv.java.doc/doc/rjvjdata.html
       def simplified_type(field_type)
         case field_type
-        when /^decimal\(1\)$/i   then :boolean
-        when /smallint|boolean/i then :boolean
+        when /^decimal\(1\)$/i   then DB2.emulate_booleans ? :boolean : :integer
+        when /smallint/i         then DB2.emulate_booleans ? :boolean : :integer
+        when /boolean/i          then :boolean
         when /^real|double/i     then :float
         when /int|serial/i       then :integer
-        when /numeric|decfloat/i then :decimal
+        # if a numeric column has no scale, lets treat it as an integer.
+        # The AS400 rpg guys do this ALOT since they have no integer datatype ...
+        when /decimal|numeric|decfloat/i
+          extract_scale(field_type) == 0 ? :integer : :decimal
         when /timestamp/i        then :timestamp
         when /datetime/i         then :datetime
         when /time/i             then :time
         when /date/i             then :date
-        when /clob/i             then :text
+        when /clob|text/i        then :text
+        when /blob|binary/i      then :binary
         when /for bit data/i     then :binary
         when /xml/i              then :xml
-        #when /vargraphic/i       then :vargraphic
-        #when /graphic/i          then :graphic
-        #when /rowid/i            then :rowid # rowid is a supported datatype on z/OS and i/5
+        when /^vargraphic/i      then :vargraphic
+        when /^graphic/i         then :graphic
+        when /rowid/i            then :rowid # rowid is a supported datatype on z/OS and i/5
         else
           super
         end
@@ -177,10 +191,45 @@ module ArJdbc
     end
 
     class TableDefinition < ::ActiveRecord::ConnectionAdapters::TableDefinition # :nodoc:
+      
       def xml(*args)
         options = args.extract_options!
         column(args[0], 'xml', options)
       end
+      
+      # IBM DB adapter (MRI) compatibility :
+      
+      def double(*args)
+        options = args.extract_options!
+        column(args[0], 'double', options)
+      end
+
+      def decfloat(*args)
+        options = args.extract_options!
+        column(args[0], 'decfloat', options)
+      end
+
+      def graphic(*args)
+        options = args.extract_options!
+        column(args[0], 'graphic', options)
+      end
+
+      def vargraphic(*args)
+        options = args.extract_options!
+        column(args[0], 'vargraphic', options)
+      end
+
+      def bigint(*args)
+        options = args.extract_options!
+        column(args[0], 'bigint', options)
+      end
+      
+      def char(*args)
+        options = args.extract_options!
+        column(args[0], 'char', options)
+      end
+      # alias_method :character, :char
+      
     end
 
     def table_definition(*args)
@@ -190,53 +239,14 @@ module ArJdbc
     def prefetch_primary_key?(table_name = nil)
       # TRUE if the table has no identity column
       names = table_name.upcase.split(".")
-      sql = ""
-      if as400?
-        sql = "SELECT 1 FROM SYSIBM.SQLPRIMARYKEYS WHERE "
-        sql += "TABLE_SCHEM = '#{names.first}' AND " if names.size == 2
-        sql += "TABLE_NAME = '#{names.last}'"
-      else
-        sql = "SELECT 1 FROM SYSCAT.COLUMNS WHERE IDENTITY = 'Y' "
-        sql += "AND TABSCHEMA = '#{names.first}' " if names.size == 2
-        sql += "AND TABNAME = '#{names.last}'"
-      end
+      sql = "SELECT 1 FROM SYSCAT.COLUMNS WHERE IDENTITY = 'Y' "
+      sql << "AND TABSCHEMA = '#{names.first}' " if names.size == 2
+      sql << "AND TABNAME = '#{names.last}'"
       select_one(sql).nil?
     end
 
     def next_sequence_value(sequence_name)
       select_value("SELECT NEXT VALUE FOR #{sequence_name} FROM sysibm.sysdummy1")
-    end
-
-    # holy moly batman! all this to tell AS400 "yes i am sure"
-    def execute_and_auto_confirm(sql)
-      begin
-        @connection.execute_update "call qsys.qcmdexc('QSYS/CHGJOB INQMSGRPY(*SYSRPYL)',0000000031.00000)"
-        @connection.execute_update "call qsys.qcmdexc('ADDRPYLE SEQNBR(9876) MSGID(CPA32B2) RPY(''I'')',0000000045.00000)"
-      rescue Exception => e
-        raise "Could not call CHGJOB INQMSGRPY(*SYSRPYL) and ADDRPYLE SEQNBR(9876) MSGID(CPA32B2) RPY('I').\n" +
-              "Do you have authority to do this?\n\n" + e.to_s
-      end
-
-      result = execute sql
-
-      begin
-        @connection.execute_update "call qsys.qcmdexc('QSYS/CHGJOB INQMSGRPY(*DFT)',0000000027.00000)"
-        @connection.execute_update "call qsys.qcmdexc('RMVRPYLE SEQNBR(9876)',0000000021.00000)"
-      rescue Exception => e
-        raise "Could not call CHGJOB INQMSGRPY(*DFT) and RMVRPYLE SEQNBR(9876).\n" +
-              "Do you have authority to do this?\n\n" + e.to_s
-      end
-      result
-    end
-
-    def _execute(sql, name = nil)
-      if self.class.select?(sql)
-        @connection.execute_query_raw(sql)
-      elsif self.class.insert?(sql)
-        (@connection.execute_insert(sql) || last_insert_id(sql)).to_i
-      else
-        @connection.execute_update(sql)
-      end
     end
     
     def last_insert_id(sql)
@@ -342,13 +352,13 @@ module ArJdbc
         end
       when String, ActiveSupport::Multibyte::Chars
         if column_type == :binary && !(column.sql_type =~ /for bit data/i)
-          if ArJdbc::DB2.lob_callback_added?
+          if ArJdbc::DB2.handle_lobs?
             "NULL" # '@@@IBMBINARY@@@'"
           else
             "BLOB('#{quote_string(value)}')"
           end
         elsif column && column.sql_type =~ /clob/ # :text
-          if ArJdbc::DB2.lob_callback_added?
+          if ArJdbc::DB2.handle_lobs?
             "NULL" # "'@@@IBMTEXT@@@'"
           else
             "'#{quote_string(value)}'"
@@ -359,6 +369,13 @@ module ArJdbc
           "'#{quote_string(value)}'"
         end
       when Symbol then "'#{quote_string(value.to_s)}'"
+      when Time
+        # AS400 doesn't support date in time column
+        if column && column_type == :time
+          "'#{value.strftime("%H:%M:%S")}'"
+        else
+          super
+        end
       else super
       end
     end
@@ -408,10 +425,11 @@ module ArJdbc
       end
       super
     end
-    
+   
     def replace_limit_offset!(sql, limit, offset)
       if limit
         limit = limit.to_i
+
         if !offset
           if limit == 1
             sql << " FETCH FIRST ROW ONLY"
@@ -419,27 +437,41 @@ module ArJdbc
             sql << " FETCH FIRST #{limit} ROWS ONLY"
           end
         else
-          offset = offset.to_i
-          sql.sub!(/SELECT/i, 'SELECT B.* FROM (SELECT A.*, row_number() over () AS internal$rownum FROM (SELECT')
-          sql << ") A ) B WHERE B.internal$rownum > #{offset} AND B.internal$rownum <= #{limit + offset}"
+          replace_limit_offset_with_ordering( sql, limit, offset )
         end
+        
       end
       sql
     end
+
+    def replace_limit_offset_for_arel!( query, sql )
+      replace_limit_offset_with_ordering sql, query.limit.value, query.offset && query.offset.value, query.orders
+    end
+
+    def replace_limit_offset_with_ordering( sql, limit, offset, orders=[] )
+      sql.sub!(/SELECT/i, "SELECT B.* FROM (SELECT A.*, row_number() over (#{build_ordering(orders)}) AS internal$rownum FROM (SELECT")
+      sql << ") A ) B WHERE B.internal$rownum > #{offset} AND B.internal$rownum <= #{limit + offset}"
+      sql
+    end
+    private :replace_limit_offset_with_ordering
     
-    def reorg_table(table_name)
-      unless as400?
-        @connection.execute_update "call sysproc.admin_cmd ('REORG TABLE #{table_name}')"
+    def build_ordering( orders )
+      return '' unless orders.size > 0
+      # need to remove the library/table names from the orderings because we are not really ordering by them anymore
+      # we are actually ordering by the results of a query where the result set has the same column names
+      orders = orders.map do |o| 
+        # need to keep in mind that the order clause could be wrapped in a function
+        matches = /(?:\w+\(|\s)*(\S+)(?:\)|\s)*/.match(o)
+        o = o.gsub( matches[1], matches[1].split('.').last ) if matches
+        o
       end
+      "ORDER BY " + orders.join( ', ')
     end
-    private :reorg_table
+    private :build_ordering
 
-    def runstats_for_table(tablename, priority=10)
+    # @deprecated seems not sued nor tested ?!
+    def runstats_for_table(tablename, priority = 10)
       @connection.execute_update "call sysproc.admin_cmd('RUNSTATS ON TABLE #{tablename} WITH DISTRIBUTION AND DETAILED INDEXES ALL UTIL_IMPACT_PRIORITY #{priority}')"
-    end
-
-    def recreate_database(name, options = {})
-      tables.each { |table| drop_table("#{db2_schema}.#{table}") }
     end
 
     def add_index(table_name, column_name, options = {})
@@ -463,12 +495,8 @@ module ArJdbc
     # http://publib.boulder.ibm.com/infocenter/db2luw/v9r7/topic/com.ibm.db2.luw.admin.dbobj.doc/doc/t0020130.html
     # ...not supported on IBM i, so we raise in this case
     def rename_column(table_name, column_name, new_column_name) #:nodoc:
-      if as400?
-        raise NotImplementedError, "rename_column is not supported on IBM i"
-      else
-        execute "ALTER TABLE #{table_name} RENAME COLUMN #{column_name} TO #{new_column_name}"
-        reorg_table(table_name)
-      end
+      sql = "ALTER TABLE #{table_name} RENAME COLUMN #{column_name} TO #{new_column_name}"
+      execute_table_change(sql, table_name, 'Rename Column')
     end
 
     def change_column_null(table_name, column_name, null)
@@ -477,8 +505,7 @@ module ArJdbc
       else
         sql = "ALTER TABLE #{table_name} ALTER COLUMN #{column_name} SET NOT NULL"
       end
-      as400? ? execute_and_auto_confirm(sql) : execute(sql)
-      reorg_table(table_name)
+      execute_table_change(sql, table_name, 'Change Column')
     end
 
     def change_column_default(table_name, column_name, default)
@@ -487,15 +514,13 @@ module ArJdbc
       else
         sql = "ALTER TABLE #{table_name} ALTER COLUMN #{column_name} SET WITH DEFAULT #{quote(default)}"
       end
-      as400? ? execute_and_auto_confirm(sql) : execute(sql)
-      reorg_table(table_name)
+      execute_table_change(sql, table_name, 'Change Column')
     end
 
     def change_column(table_name, column_name, type, options = {})
       data_type = type_to_sql(type, options[:limit], options[:precision], options[:scale])
       sql = "ALTER TABLE #{table_name} ALTER COLUMN #{column_name} SET DATA TYPE #{data_type}"
-      as400? ? execute_and_auto_confirm(sql) : execute(sql)
-      reorg_table(table_name)
+      execute_table_change(sql, table_name, 'Change Column')
 
       if options.include?(:default) and options.include?(:null)
         # which to run first?
@@ -514,22 +539,23 @@ module ArJdbc
     end
     
     # http://publib.boulder.ibm.com/infocenter/db2luw/v9r7/topic/com.ibm.db2.luw.admin.dbobj.doc/doc/t0020132.html
-    def remove_column(table_name, *column_names) #:nodoc:
-      for column_name in column_names.flatten
+    def remove_column(table_name, *column_names) # :nodoc:
+      outcome = nil
+      column_names = column_names.flatten
+      for column_name in column_names
         sql = "ALTER TABLE #{table_name} DROP COLUMN #{column_name}"
-        as400? ? execute_and_auto_confirm(sql) : execute(sql)
+        outcome = execute_table_change(sql, table_name, 'Remove Column')
       end
-      reorg_table(table_name)
+      column_names.size == 1 ? outcome : nil
     end
 
     # http://publib.boulder.ibm.com/infocenter/db2luw/v9r7/topic/com.ibm.db2.luw.sql.ref.doc/doc/r0000980.html
-    def rename_table(name, new_name) #:nodoc:
-      execute "RENAME TABLE #{name} TO #{new_name}"
-      reorg_table(new_name)
+    def rename_table(name, new_name) # :nodoc:
+      execute_table_change("RENAME TABLE #{name} TO #{new_name}", new_name, 'Rename Table')
     end
     
     def tables
-      @connection.tables(nil, db2_schema, nil, ["TABLE"])
+      @connection.tables(nil, schema)
     end
 
     # only record precision and scale for types that can set them via CREATE TABLE:
@@ -539,7 +565,7 @@ module ArJdbc
     HAVE_SCALE = %w(DECIMAL NUMERIC)
 
     def columns(table_name, name = nil)
-      columns = @connection.columns_internal(table_name.to_s, nil, db2_schema)
+      columns = @connection.columns_internal(table_name.to_s, nil, schema) # catalog == nil
 
       if zos?
         # Remove the mighty db2_generated_rowid_for_lobs from the list of columns
@@ -557,135 +583,86 @@ module ArJdbc
       columns
     end
 
-    def jdbc_columns(table_name, name = nil)
-      columns(table_name, name)
-    end
-
     def indexes(table_name, name = nil)
-      @connection.indexes(table_name, name, db2_schema)
+      @connection.indexes(table_name, name, schema)
     end
 
-    def add_quotes(name)
-      return name unless name
-      %Q{"#{name}"}
+    def recreate_database(name = nil, options = {})
+      drop_database(name)
     end
-
-    def strip_quotes(str)
-      return str unless str
-      return str unless /^(["']).*\1$/ =~ str
-      str[1..-2]
+    
+    def drop_database(name = nil)
+      tables.each { |table| drop_table("#{table}") }
     end
-
-    def expand_double_quotes(name)
-      return name unless name && name['"']
-      name.gsub(/"/,'""')
+    
+    def execute_table_change(sql, table_name, name = nil)
+      outcome = execute(sql, name)
+      reorg_table(table_name, name)
+      outcome
     end
+    protected :execute_table_change
+    
+    def reorg_table(table_name, name = nil)
+      exec_update "call sysproc.admin_cmd ('REORG TABLE #{table_name}')", name, []
+    end
+    private :reorg_table
+    
+    # alias_method :execute_and_auto_confirm, :execute
 
-    def structure_dump #:nodoc:
-      schema_name = db2_schema.upcase if db2_schema.present?
-      rs = @connection.connection.meta_data.getTables(nil, schema_name, nil, ["TABLE"].to_java(:string))
-      definition = ''
-      while rs.next
-        tname = rs.getString(3)
-        definition << "CREATE TABLE #{tname} (\n"
-        rs2 = @connection.connection.meta_data.getColumns(nil,schema_name,tname,nil)
-        first_col = true
-        while rs2.next
-          col_name = add_quotes(rs2.getString(4));
-          default = ""
-          d1 = rs2.getString(13)
-          # IBM i (as400 toolbox driver) will return an empty string if there is no default
-          if @config[:url] =~ /^jdbc:as400:/
-            default = !d1.blank? ? " DEFAULT #{d1}" : ""
-          else
-            default = d1 ? " DEFAULT #{d1}" : ""
-          end
-
-          type = rs2.getString(6)
-          col_precision = rs2.getString(7)
-          col_scale = rs2.getString(9)
-          col_size = ""
-          if HAVE_SCALE.include?(type) and col_scale
-            col_size = "(#{col_precision},#{col_scale})"
-          elsif (HAVE_LIMIT + HAVE_PRECISION).include?(type) and col_precision
-            col_size = "(#{col_precision})"
-          end
-          nulling = (rs2.getString(18) == 'NO' ? " NOT NULL" : "")
-          autoincrement = (rs2.getString(23) == 'YES' ? " GENERATED ALWAYS AS IDENTITY" : "")
-          create_col_string = add_quotes(expand_double_quotes(strip_quotes(col_name))) +
-            " " +
-            type +
-            col_size +
-            "" +
-            nulling +
-            default +
-            autoincrement
-          if !first_col
-            create_col_string = ",\n #{create_col_string}"
-          else
-            create_col_string = " #{create_col_string}"
-          end
-
-          definition << create_col_string
-
-          first_col = false
-        end
-        definition << ");\n\n"
-
-        pkrs = @connection.connection.meta_data.getPrimaryKeys(nil,schema_name,tname)
-        primary_key = {}
-        while pkrs.next
-          name = pkrs.getString(6)
-          primary_key[name] = [] unless primary_key[name]
-          primary_key[name] << pkrs.getString(4)
-        end
-        primary_key.each do |name, cols|
-          definition << "ALTER TABLE #{tname}\n"
-          definition << "  ADD CONSTRAINT #{name}\n"
-          definition << "      PRIMARY KEY (#{cols.join(', ')});\n\n"
-        end
+    def _execute(sql, name = nil)
+      if self.class.select?(sql)
+        @connection.execute_query_raw(sql)
+      elsif self.class.insert?(sql)
+        (@connection.execute_insert(sql) || last_insert_id(sql)).to_i
+      else
+        @connection.execute_update(sql)
       end
-      definition
     end
+    private :_execute
     
     DRIVER_NAME = 'com.ibm.db2.jcc.DB2Driver'.freeze
     
     def zos?
+      @zos = nil unless defined? @zos
       return @zos unless @zos.nil?
       @zos = 
-        if url = @config[:url]
-          !!( url =~ /^jdbc:db2j:net:/ && @config[:driver] == DRIVER_NAME )
+        if url = config[:url]
+          !!( url =~ /^jdbc:db2j:net:/ && config[:driver] == DRIVER_NAME )
         else
           nil
         end
     end
     
+    # @deprecated no longer used
     def as400?
-      return @as400 unless @as400.nil?
-      @as400 = 
-        if url = @config[:url]
-          !!( url =~ /^jdbc:as400:/ )
-        else
-          nil
-        end
+      false
     end
 
+    def schema
+      db2_schema
+    end
+    
+    def schema=(schema)
+      set_schema(@db2_schema = schema) if db2_schema != schema
+    end
+    
     private
     
+    def set_schema(schema)
+      execute("SET SCHEMA #{schema}")
+    end
+    
     def db2_schema
-      return @db2_schema unless @db2_schema.nil?
+      @db2_schema = false unless defined? @db2_schema
+      return @db2_schema if @db2_schema != false
       @db2_schema = 
-        if @config[:schema].present?
-          @config[:schema]
-        elsif @config[:jndi].present?
+        if config[:schema].present?
+          config[:schema]
+        elsif config[:jndi].present?
           nil # let JNDI worry about schema
-        elsif as400?
-          # AS400 implementation takes schema from library name (last part of URL)
-          # jdbc:as400://localhost/schema;naming=system;libraries=lib1,lib2
-          @config[:url].split('/').last.split(';').first.strip
         else
           # LUW implementation uses schema name of username by default
-          @config[:username].presence || ENV['USER']
+          config[:username].presence || ENV['USER']
         end
     end
     

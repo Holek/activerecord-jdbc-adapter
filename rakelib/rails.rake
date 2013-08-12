@@ -8,17 +8,23 @@ namespace :rails do
 
     ar_jdbc_dir = File.expand_path('..', File.dirname(__FILE__))
     
-    rubylib = [ 
+    ruby_lib = [ 
       "#{ar_jdbc_dir}/lib",
+      "#{ar_jdbc_dir}/test/rails",
       "#{ar_jdbc_dir}/jdbc-#{_driver(driver)}/lib",
       "#{ar_jdbc_dir}/activerecord-jdbc#{_adapter(driver)}-adapter/lib"
     ]
-    rubylib << File.expand_path('activesupport/lib', rails_dir)
-    rubylib << File.expand_path('activemodel/lib', rails_dir)
-    rubylib << File.expand_path(File.join(activerecord_dir, 'lib'))
-    #rubylib << File.expand_path('actionpack/lib', rails_dir)
+    ruby_lib << File.expand_path('activesupport/lib', rails_dir)
+    ruby_lib << File.expand_path('activemodel/lib', rails_dir)
+    ruby_lib << File.expand_path(File.join(activerecord_dir, 'lib'))
+    requires = _requires(driver) || []
 
-    Dir.chdir(activerecord_dir) { rake "RUBYLIB=#{rubylib.join(':')}", "#{_target(driver)}" }
+    Dir.chdir(activerecord_dir) do
+      ruby = FileUtils::RUBY
+      rubylib = ruby_lib.join(':') # i_lib = "-I#{rubylib}"
+      r_requires = requires.map { |feat| "-r#{feat}" }.join(' ')
+      sh "#{ruby} -S rake RUBYLIB=#{rubylib} RUBYOPT=\"#{r_requires}\" #{_target(driver)}"
+    end
   end
   
   %w(MySQL SQLite3 Postgres).each do |adapter|
@@ -55,6 +61,17 @@ namespace :rails do
     else
       "test_jdbc#{name.downcase}"
     end
+  end
+
+  def _requires(name)
+    requires = []
+    requires << 'ubygems'
+    requires << 'active_support/json' # avoid uninitialized constant BasicsTest::JSON
+    case name
+    when /mysql/i
+      requires << 'mysql' # -rmysql - so Rails tests do not complain about Mysql
+    end
+    requires
   end
   
 end

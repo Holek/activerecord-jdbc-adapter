@@ -1,4 +1,3 @@
-require 'helper'
 require 'stringio'
 
 begin
@@ -10,7 +9,10 @@ end
 Bundler.require(:default, :test)
 
 require 'test/unit'
+require 'test/unit/context'
 begin; require 'mocha/setup'; rescue LoadError; require 'mocha'; end
+
+require 'shared_helper'
 
 if ENV['COVERAGE']
   require 'simplecov'
@@ -26,7 +28,14 @@ puts "Using ActiveRecord::VERSION = #{ActiveRecord::VERSION::STRING}"
 # but level is set to "warn" unless $DEBUG or ENV['DEBUG'] is set :
 require 'logger'
 ActiveRecord::Base.logger = Logger.new($stdout)
-ActiveRecord::Base.logger.level = $DEBUG || ENV['DEBUG'] ? Logger::DEBUG : Logger::WARN
+ActiveRecord::Base.logger.level = 
+  if level = ENV['LOG_LEVEL']
+    level.to_i.to_s == level ? level.to_i : Logger.const_get(level.upcase)
+  elsif $DEBUG || ENV['DEBUG']
+    Logger::DEBUG
+  else
+    Logger::WARN
+  end
 
 begin
   require 'ruby-debug' if $DEBUG || ENV['DEBUG']
@@ -70,13 +79,35 @@ class Test::Unit::TestCase
     strio.string
   end
   
-#  def teardown
-#    clear_active_connections!
-#  end
-#
-#  def clear_active_connections!
-#    ActiveRecord::Base.clear_active_connections!
-#  end
+  def self.disable_logger(connection, &block)
+    raise "need a block" unless block_given?
+    return disable_connection_logger(connection, &block) if connection
+    logger = ActiveRecord::Base.logger
+    begin
+      ActiveRecord::Base.logger = nil
+      yield
+    ensure
+      ActiveRecord::Base.logger = logger
+    end
+  end
+
+  def self.disable_connection_logger(connection)
+    logger = connection.send(:instance_variable_get, :@logger)
+    begin
+      connection.send(:instance_variable_set, :@logger, nil)
+      yield
+    ensure
+      connection.send(:instance_variable_set, :@logger, logger)
+    end    
+  end
+  
+  def disable_logger(connection, &block)
+    self.class.disable_logger(connection, &block)
+  end
+  
+  def clear_active_connections!
+    ActiveRecord::Base.clear_active_connections!
+  end
   
   protected
   
@@ -222,15 +253,20 @@ module ActiveRecord
     @@log = []
     def self.log; @@log; end
     def self.log=(log); @@log = log;; end
-
+    
+    def initialize(ignored_sql = self.class.ignored_sql)
+      @ignored_sql = ignored_sql
+    end
+    
     def call(name, start, finish, message_id, values)
+      return if 'CACHE' == values[:name]
+      
       sql = values[:sql]
-
-      # FIXME: this seems bad. we should probably have a better way to indicate
-      # the query was cached
-      unless 'CACHE' == values[:name]
-        self.class.log << sql unless self.class.ignored_sql.any? { |r| sql =~ r }
-      end
+      sql = sql.to_sql unless sql.is_a?(String)
+      
+      return if @ignored_sql.any? { |x| x =~ sql }
+      
+      self.class.log << sql
     end
     
     @@enabled = true

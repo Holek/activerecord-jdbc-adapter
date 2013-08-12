@@ -1,15 +1,11 @@
 require 'test_helper'
 
-config = {
-  :adapter => 'hsqldb',
-  :database => 'test.db'
-}
+config = { :adapter => 'hsqldb', :database => 'test.hsqldb' }
 
 ActiveRecord::Base.establish_connection(config)
 
-at_exit {
-  # Clean up hsqldb when done
-  require "fileutils"
-  Dir['test.db*'].each {|f| FileUtils.rm_rf(f)}
-  FileUtils.rm_rf('hsqldb-testdb.log') rescue nil #can't delete on windows
-}
+at_exit do
+  Dir['*test.hsqldb*'].each do |f|
+    FileUtils.rm_rf(f); File.delete(f) if File.exist?(f)
+  end
+end

@@ -1,7 +1,9 @@
+ArJdbc.load_java_part :SQLite3
+
 require 'arjdbc/jdbc/missing_functionality_helper'
 require 'arjdbc/sqlite3/explain_support'
 
-module ::ArJdbc
+module ArJdbc
   module SQLite3
     
     def self.column_selector
@@ -86,14 +88,21 @@ module ::ArJdbc
       
     end
 
-    def self.arel2_visitors(config)
-      {
-        'sqlite3' => ::Arel::Visitors::SQLite,
-        'jdbcsqlite3' => ::Arel::Visitors::SQLite
-      }
+    def self.arel2_visitors(config = nil)
+      { 'sqlite3' => ::Arel::Visitors::SQLite, 'jdbcsqlite3' => ::Arel::Visitors::SQLite }
     end
     
-    ADAPTER_NAME = 'SQLite'
+    def new_visitor(config = nil)
+      visitor = ::Arel::Visitors::SQLite
+      ( prepared_statements? ? visitor : bind_substitution(visitor) ).new(self)
+    end if defined? ::Arel::Visitors::SQLite
+    
+    # @see #bind_substitution
+    class BindSubstitution < Arel::Visitors::SQLite # :nodoc:
+      include Arel::Visitors::BindVisitor
+    end if defined? Arel::Visitors::BindVisitor
+    
+    ADAPTER_NAME = 'SQLite'.freeze
     
     def adapter_name # :nodoc:
       ADAPTER_NAME
@@ -200,6 +209,10 @@ module ::ArJdbc
       end
     end
 
+    def quote_table_name_for_assignment(table, attr)
+      quote_column_name(attr)
+    end if ::ActiveRecord::VERSION::MAJOR > 3
+    
     def quote_column_name(name) # :nodoc:
       %Q("#{name.to_s.gsub('"', '""')}") # "' kludge for emacs font-lock
     end
@@ -235,22 +248,6 @@ module ::ArJdbc
       table_name && tables(nil, table_name).any?
     end
     
-    IndexDefinition = ::ActiveRecord::ConnectionAdapters::IndexDefinition # :nodoc:
-    
-    def indexes(table_name, name = nil)
-      result = select_rows("SELECT name, sql FROM sqlite_master" <<
-      " WHERE tbl_name = #{quote_table_name(table_name)} AND type = 'index'", name)
-
-      result.map do |row|
-        name, index_sql = row[0], row[1]
-        unique = !! (index_sql =~ /unique/i)
-        columns = index_sql.match(/\((.*)\)/)[1].gsub(/,/,' ').split.map do |col|
-          match = /^"(.+)"$/.match(col); match ? match[1] : col
-        end
-        IndexDefinition.new(table_name, name, unique, columns)
-      end
-    end
-    
     # Returns 62. SQLite supports index names up to 64
     # characters. The rest is used by rails internally to perform
     # temporary rename operations
@@ -270,7 +267,15 @@ module ::ArJdbc
       execute("RELEASE SAVEPOINT #{current_savepoint_name}")
     end
     
-    def recreate_database(name, options = {})
+    def recreate_database(name = nil, options = {}) # :nodoc:
+      drop_database(name)
+      create_database(name, options)
+    end
+    
+    def create_database(name = nil, options = {}) # :nodoc:
+    end
+
+    def drop_database(name = nil) # :nodoc:
       tables.each { |table| drop_table(table) }
     end
     
@@ -294,7 +299,7 @@ module ::ArJdbc
       result
     end
 
-    # #override as {#execute_insert} not implemented by SQLite JDBC driver
+    # @override as <code>execute_insert</code> not implemented by SQLite JDBC
     def exec_insert(sql, name, binds, pk = nil, sequence_name = nil) # :nodoc:
       execute(sql, name, binds)
     end
@@ -308,7 +313,7 @@ module ::ArJdbc
       raise e
     end
 
-    def jdbc_columns(table_name, name = nil) # :nodoc:
+    def columns(table_name, name = nil) # :nodoc:
       klass = ::ActiveRecord::ConnectionAdapters::SQLite3Column
       table_structure(table_name).map do |field|
         klass.new(field['name'], field['dflt_value'], field['type'], field['notnull'] == 0)
@@ -345,6 +350,16 @@ module ::ArJdbc
       end
     end
 
+    if ActiveRecord::VERSION::MAJOR >= 4
+      
+    def remove_column(table_name, column_name, type = nil, options = {}) #:nodoc:
+      alter_table(table_name) do |definition|
+        definition.remove_column column_name
+      end
+    end
+      
+    else
+      
     def remove_column(table_name, *column_names) #:nodoc:
       if column_names.empty?
         raise ArgumentError.new(
@@ -359,7 +374,9 @@ module ::ArJdbc
       end
     end
     alias :remove_columns :remove_column
-
+    
+    end
+    
     def change_column_default(table_name, column_name, default) #:nodoc:
       alter_table(table_name) do |definition|
         definition[column_name].default = default
@@ -410,6 +427,10 @@ module ::ArJdbc
       "DEFAULT VALUES"
     end
     
+    def encoding
+      select_value 'PRAGMA encoding'
+    end
+    
     protected
     
     include ArJdbc::MissingFunctionalityHelper
@@ -442,9 +463,10 @@ module ::ArJdbc
 end
 
 module ActiveRecord::ConnectionAdapters
-  remove_const(:SQLite3Adapter) if const_defined?(:SQLite3Adapter)
-  remove_const(:SQLiteAdapter) if const_defined?(:SQLiteAdapter)
 
+  # NOTE: SQLite3Column exists in native adapter since AR 4.0
+  remove_const(:SQLite3Column) if const_defined?(:SQLite3Column)
+  
   class SQLite3Column < JdbcColumn
     include ArJdbc::SQLite3::Column
 
@@ -467,7 +489,9 @@ module ActiveRecord::ConnectionAdapters
       value
     end
   end
-
+  
+  remove_const(:SQLite3Adapter) if const_defined?(:SQLite3Adapter)
+  
   class SQLite3Adapter < JdbcAdapter
     include ArJdbc::SQLite3
     include ArJdbc::SQLite3::ExplainSupport
@@ -477,24 +501,17 @@ module ActiveRecord::ConnectionAdapters
     end
 
     def jdbc_column_class
-      ActiveRecord::ConnectionAdapters::SQLite3Column
+      ::ActiveRecord::ConnectionAdapters::SQLite3Column
     end
-
-    alias_chained_method :columns, :query_cache, :jdbc_columns
     
   end
 
-  SQLiteAdapter = SQLite3Adapter
-end
+  if ActiveRecord::VERSION::MAJOR <= 3
+    remove_const(:SQLiteColumn) if const_defined?(:SQLiteColumn)
+    SQLiteColumn = SQLite3Column
+    
+    remove_const(:SQLiteAdapter) if const_defined?(:SQLiteAdapter)
 
-# Don't need to load native sqlite3 adapter
-$LOADED_FEATURES << 'active_record/connection_adapters/sqlite_adapter.rb'
-$LOADED_FEATURES << 'active_record/connection_adapters/sqlite3_adapter.rb'
-
-# Fake out sqlite3/version driver for AR tests
-$LOADED_FEATURES << 'sqlite3/version.rb'
-module SQLite3
-  module Version
-    VERSION = '1.2.6' # query_cache_test.rb requires SQLite3::Version::VERSION > '1.2.5'
+    SQLiteAdapter = SQLite3Adapter
   end
 end

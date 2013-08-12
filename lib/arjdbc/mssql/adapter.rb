@@ -1,10 +1,11 @@
+ArJdbc.load_java_part :MSSQL
+
 require 'strscan'
 require 'arjdbc/mssql/utils'
 require 'arjdbc/mssql/tsql_methods'
 require 'arjdbc/mssql/limit_helpers'
 require 'arjdbc/mssql/lock_helpers'
 require 'arjdbc/mssql/explain_support'
-require 'arjdbc/jdbc/serialized_attributes_helper'
 
 module ArJdbc
   module MSSQL
@@ -12,39 +13,41 @@ module ArJdbc
     include TSqlMethods
     
     include ExplainSupport
-
-    @@_lob_callback_added = nil
     
-    def self.extended(base)
-      unless @@_lob_callback_added
-        ActiveRecord::Base.class_eval do
-          def after_save_with_mssql_lob
-            self.class.columns.select { |c| c.sql_type =~ /image/i }.each do |column|
-              value = ::ArJdbc::SerializedAttributesHelper.dump_column_value(self, column)
-              next if value.nil? || (value == '')
-
-              connection.write_large_object(
-                column.type == :binary, column.name, 
-                self.class.table_name, self.class.primary_key, 
-                quote_value(id), value
-              )
-            end
-          end
-        end
-
-        ActiveRecord::Base.after_save :after_save_with_mssql_lob
-        @@_lob_callback_added = true
-      end
+    def self.extended(adapter) # :nodoc:
+      initialize!
       
-      if ( version = base.sqlserver_version ) == '2000'
+      if ( version = adapter.sqlserver_version ) == '2000'
         extend LimitHelpers::SqlServer2000AddLimitOffset
       else
         extend LimitHelpers::SqlServerAddLimitOffset
       end
-      base.config[:sqlserver_version] ||= version
-      base.configure_connection
+      adapter.config[:sqlserver_version] ||= version
     end
 
+    @@_initialized = nil
+    
+    def self.initialize!
+      return if @@_initialized; @@_initialized = true
+      
+      require 'arjdbc/jdbc/serialized_attributes_helper'
+      ActiveRecord::Base.class_eval do
+        def after_save_with_mssql_lob
+          self.class.columns.select { |c| c.sql_type =~ /image/i }.each do |column|
+            value = ::ArJdbc::SerializedAttributesHelper.dump_column_value(self, column)
+            next if value.nil? || (value == '')
+
+            self.class.connection.write_large_object(
+              column.type == :binary, column.name, 
+              self.class.table_name, self.class.primary_key, 
+              self.class.connection.quote(id), value
+            )
+          end
+        end
+      end
+      ActiveRecord::Base.after_save :after_save_with_mssql_lob
+    end
+    
     def configure_connection
       use_database # config[:database]
     end
@@ -72,7 +75,7 @@ module ArJdbc
       @sqlserver_version ||= begin
         config_version = config[:sqlserver_version]
         config_version ? config_version.to_s :
-          select_value("SELECT @@version")[/Microsoft SQL Server\s+(\d{4})/, 1]
+          select_value("SELECT @@version")[/(Microsoft SQL Server\s+|Microsoft SQL Azure.+\n.+)(\d{4})/, 2]
       end
     end
 
@@ -310,13 +313,17 @@ module ArJdbc
       quote_column_name(name)
     end
     
+#    def quote_table_name_for_assignment(table, attr)
+#      quote_column_name(attr)
+#    end if ::ActiveRecord::VERSION::MAJOR > 3
+    
     def quote_column_name(name)
       name.to_s.split('.').map do |n| # "[#{name}]"
         n =~ /^\[.*\]$/ ? n : "[#{n.gsub(']', ']]')}]"
       end.join('.')
     end
 
-    ADAPTER_NAME = 'MSSQL'
+    ADAPTER_NAME = 'MSSQL'.freeze
     
     def adapter_name # :nodoc:
       ADAPTER_NAME
@@ -351,12 +358,13 @@ module ArJdbc
     # 
     # http://blogs.msdn.com/b/mssqlisv/archive/2007/03/23/upgrading-to-sql-server-2005-and-default-schema-setting.aspx
     
-    # Returns the default schema (to be used for table resolution) used for 
-    # the {#current_user}.
+    # Returns the default schema (to be used for table resolution) used for the {#current_user}.
     def default_schema
       return current_user if sqlserver_2000?
       @default_schema ||= 
-        select_value("SELECT default_schema_name FROM sys.database_principals WHERE name = CURRENT_USER")
+        @connection.execute_query_raw(
+          "SELECT default_schema_name FROM sys.database_principals WHERE name = CURRENT_USER"
+        ).first['default_schema_name']
     end
     alias_method :current_schema, :default_schema
 
@@ -372,11 +380,15 @@ module ArJdbc
     
     # `SELECT CURRENT_USER`
     def current_user
-      @current_user ||= select_value("SELECT CURRENT_USER")
+      @current_user ||= @connection.execute_query_raw("SELECT CURRENT_USER").first['']
     end
     
     def charset
       select_value "SELECT SERVERPROPERTY('SqlCharSetName')"
+    end
+
+    def collation
+      select_value "SELECT SERVERPROPERTY('Collation')"
     end
     
     def current_database
@@ -409,6 +421,10 @@ module ArJdbc
 
     def create_database(name, options = {})
       execute "CREATE DATABASE #{quote_table_name(name)}"
+    end
+
+    def database_exists?(name)
+      select_value "SELECT name FROM sys.databases WHERE name = '#{name}'"
     end
     
     def rename_table(table_name, new_table_name)
@@ -596,16 +612,27 @@ module ArJdbc
     end
     alias_method :execute_procedure, :exec_proc # AR-SQLServer-Adapter naming
     
-    protected
+    # @override
+    def exec_query(sql, name = 'SQL', binds = []) # :nodoc:
+      # NOTE: we allow to execute SQL as requested returning a results.
+      # e.g. this allows to use SQLServer's EXEC with a result set ...
+      sql = repair_special_columns to_sql(sql, binds)
+      if prepared_statements?
+        log(sql, name, binds) { @connection.execute_query(sql, binds) }
+      else
+        sql = suble_binds(sql, binds)
+        log(sql, name) { @connection.execute_query(sql) }
+      end
+    end
     
-    # NOTE: we allow to execute the SQL as explicitly requested by this,
-    # {#exec_query} won't route to {#_execute} and analyze if it's a select 
-    # e.g. this allows to use SQLServer's EXEC with a result set ...
-    def do_exec(sql, name, binds, type)
-      if type == :query # exec_query
-        sql = repair_special_columns to_sql(sql, binds)
-        log(sql, name || 'SQL') { @connection.execute_query sql }
-      else super
+    # @override
+    def exec_query_raw(sql, name = 'SQL', binds = [], &block) # :nodoc:
+      sql = repair_special_columns to_sql(sql, binds)
+      if prepared_statements?
+        log(sql, name, binds) { @connection.execute_query_raw(sql, binds, &block) }
+      else
+        sql = suble_binds(sql, binds)
+        log(sql, name) { @connection.execute_query_raw(sql, &block) }
       end
     end
     
@@ -676,7 +703,49 @@ module ArJdbc
 end
 
 module ActiveRecord::ConnectionAdapters
+  
+  class MSSQLAdapter < JdbcAdapter
+    include ::ArJdbc::MSSQL
+    
+    def initialize(*args)
+      ::ArJdbc::MSSQL.initialize!
+      
+      super # configure_connection happens in super
+      
+      if ( version = self.sqlserver_version ) == '2000'
+        extend LimitHelpers::SqlServer2000AddLimitOffset
+      else
+        extend LimitHelpers::SqlServerAddLimitOffset
+      end
+      config[:sqlserver_version] ||= version
+    end
+    
+    # some QUOTING caching :
+
+    @@quoted_table_names = {}
+
+    def quote_table_name(name)
+      unless quoted = @@quoted_table_names[name]
+        quoted = super
+        @@quoted_table_names[name] = quoted.freeze
+      end
+      quoted
+    end
+
+    @@quoted_column_names = {}
+
+    def quote_column_name(name)
+      unless quoted = @@quoted_column_names[name]
+        quoted = super
+        @@quoted_column_names[name] = quoted.freeze
+      end
+      quoted
+    end
+    
+  end
+  
   class MSSQLColumn < JdbcColumn
     include ArJdbc::MSSQL::Column
   end
+  
 end

@@ -1,3 +1,4 @@
 require 'arjdbc'
-require 'arjdbc/informix/connection_methods'
+ArJdbc.load_java_part :Informix
 require 'arjdbc/informix/adapter'
+require 'arjdbc/informix/connection_methods'
