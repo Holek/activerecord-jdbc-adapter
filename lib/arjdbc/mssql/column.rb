@@ -143,7 +143,8 @@ module ArJdbc
           fast_string_to_time(value) ||
             begin
               DateTime.parse(value).to_time
-            rescue nil
+            rescue
+              nil
             end
         end
 
