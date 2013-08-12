@@ -3,23 +3,20 @@ require 'jdbc_common'
 require 'db/sqlite3'
 
 class SQLite3TypeConversionTest < Test::Unit::TestCase
-  
+
   if defined?(JRUBY_VERSION)
-    JInteger = java.lang.Integer
+    MAX_INTEGER_VALUE =  Java::JavaLang::Integer::MAX_VALUE
   else
-    JInteger = Fixnum
-    class Fixnum
-      MAX_VALUE = 1024 * 1024 # arbitrary value ... we could pick
-    end
+    MAX_INTEGER_VALUE = 2147483647
   end
-  
-  def self.startup; DbTypeMigration.up; end
-  def self.shutdown; DbTypeMigration.down; end
-  
+
+  def self.startup; super; DbTypeMigration.up; end
+  def self.shutdown; DbTypeMigration.down; super; end
+
   TEST_BINARY = "Some random binary data % \0 and then some"
-  
+
   @@time_zone = Time.zone
-  
+
   setup do
     Time.zone = ActiveSupport::TimeZone['UTC']
     DbType.delete_all
@@ -29,7 +26,7 @@ class SQLite3TypeConversionTest < Test::Unit::TestCase
       :sample_datetime => some_time.to_datetime,
       :sample_time => some_time.to_time,
       :sample_date => some_time.to_date,
-      :sample_decimal => JInteger::MAX_VALUE + 1,
+      :sample_decimal => MAX_INTEGER_VALUE + 1,
       :sample_small_decimal => 3.14,
       :sample_binary => TEST_BINARY)
     DbType.create!(
@@ -37,16 +34,16 @@ class SQLite3TypeConversionTest < Test::Unit::TestCase
       :sample_datetime => some_time.to_datetime,
       :sample_time => some_time.to_time,
       :sample_date => some_time.to_date,
-      :sample_decimal => JInteger::MAX_VALUE + 1,
+      :sample_decimal => MAX_INTEGER_VALUE + 1,
       :sample_small_decimal => 1.0,
       :sample_binary => TEST_BINARY)
   end
 
   teardown { Time.zone = @@time_zone; DbType.delete_all }
-  
+
   def test_decimal
     types = DbType.first
-    assert_equal((JInteger::MAX_VALUE + 1), types.sample_decimal)
+    assert_equal MAX_INTEGER_VALUE + 1, types.sample_decimal
   end
 
   def test_decimal_scale
@@ -57,27 +54,32 @@ class SQLite3TypeConversionTest < Test::Unit::TestCase
     assert_equal(3, DbType.columns_hash["sample_small_decimal"].precision)
   end
 
-  def test_small_decimal
-    types = DbType.all :order => "sample_small_decimal DESC"
+  def test_small_decimal_with_ordering
+    if ar_version('4.0')
+      types = DbType.order("sample_small_decimal DESC").load
+    else
+      types = DbType.all :order => "sample_small_decimal DESC"
+    end
     assert_equal(3.14, types[0].sample_small_decimal)
     assert_equal(1.0, types[1].sample_small_decimal)
-  end
 
-  def test_small_decimal_with_ordering
-    types = DbType.all :order => "sample_small_decimal ASC"
-    types[1].sample_small_decimal
+    if ar_version('4.0')
+      types = DbType.order("sample_small_decimal ASC").load
+    else
+      types = DbType.all :order => "sample_small_decimal ASC"
+    end
     assert_equal(1.0, types[0].sample_small_decimal)
     assert_equal(3.14, types[1].sample_small_decimal)
   end
-  
+
   def test_binary
     types = DbType.first
     assert_equal(TEST_BINARY, types.sample_binary)
   end
-  
+
   class DualEncoding < ActiveRecord::Base
   end
-  
+
   def test_quote_binary_column_escapes_it
     DualEncoding.connection.execute(<<-eosql)
       CREATE TABLE dual_encodings (
@@ -100,5 +102,5 @@ class SQLite3TypeConversionTest < Test::Unit::TestCase
       assert_equal "01 \x80", binary.data
     end
   end
-  
+
 end

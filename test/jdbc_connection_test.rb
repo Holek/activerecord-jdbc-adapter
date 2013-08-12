@@ -56,12 +56,12 @@ class JdbcConnectionTest < Test::Unit::TestCase
     ActiveRecord::Base.connection.expects(:configure_connection).once
     ActiveRecord::Base.connection.reconnect!
   end
-  
+
   class MockDriver < ActiveRecord::ConnectionAdapters::JdbcDriver
-    
-    class DriverImpl 
+
+    class DriverImpl
       include Java::JavaSql::Driver
-      
+
       def connect(url, info)
         if url =~ /invalid_authorization_spec/i
           raise Java::JavaSql::SQLInvalidAuthorizationSpecException.new
@@ -70,13 +70,13 @@ class JdbcConnectionTest < Test::Unit::TestCase
           raise Java::JavaSql::SQLException.new(reason, '42000', 1042)
         end
       end
-      
+
     end
-    
+
     def driver_class; DriverImpl; end
-    
+
   end
-  
+
   test 'driver sql exceptions are wrapped into jdbc errors' do
     config = JDBC_CONFIG.dup
     config[:driver_instance] = MockDriver.new('MockDriver')
@@ -110,17 +110,24 @@ class JdbcConnectionTest < Test::Unit::TestCase
       ActiveRecord::Base.establish_connection JDBC_CONFIG
     end
   end
-  
+
   context 'configuration' do
 
     test 'connection url' do
       adapter = ActiveRecord::Base.connection
       connection = adapter.raw_connection # JdbcConnection
-      connection.config = { :url => "jdbc://somehost", :options => { :hoge => "true", :fuya => "false" } }
-      assert_equal "jdbc://somehost?hoge=true&fuya=false", connection.send(:jdbc_url)
+      original_config = connection.config.dup
+      begin
+        connection.config.replace :url => "jdbc://somehost",
+          :options => { :hoge => "true", :fuya => "false" }
+        assert_equal "jdbc://somehost?hoge=true&fuya=false", connection.send(:jdbc_url)
 
-      connection.config = { :url => "jdbc://somehost?param=0", :options => { :hoge => "true", :fuya => false } }
-      assert_equal "jdbc://somehost?param=0&hoge=true&fuya=false", connection.send(:jdbc_url)
+        connection.config.replace :url => "jdbc://somehost?param=0",
+          :options => { :hoge => "true", :fuya => false }
+        assert_equal "jdbc://somehost?param=0&hoge=true&fuya=false", connection.send(:jdbc_url)
+      ensure
+        connection.config.replace original_config
+      end
     end
 
     test 'connection fails without driver and url' do
@@ -140,12 +147,12 @@ class JdbcConnectionTest < Test::Unit::TestCase
         end
       end
     end
-    
+
     test 'connection does not fail with driver_instance and url' do
       load_derby_driver
       with_connection_removed do
         driver_instance = ActiveRecord::ConnectionAdapters::JdbcDriver.new('org.apache.derby.jdbc.EmbeddedDriver')
-        ActiveRecord::Base.establish_connection :adapter => 'jdbc', 
+        ActiveRecord::Base.establish_connection :adapter => 'jdbc',
           :url => 'jdbc:derby:memory:TestDB;create=true', :driver_instance => driver_instance
         assert_nothing_raised do
           ActiveRecord::Base.connection
@@ -160,11 +167,11 @@ class JdbcConnectionTest < Test::Unit::TestCase
         end
       end
     end
-    
+
     test 'configures driver instance' do
       load_derby_driver
       with_connection_removed do
-        ActiveRecord::Base.establish_connection :adapter => 'jdbc', 
+        ActiveRecord::Base.establish_connection :adapter => 'jdbc',
           :url => 'jdbc:derby:memory:TestDB;create=true', :driver => 'org.apache.derby.jdbc.EmbeddedDriver'
         assert_nothing_raised do
           ActiveRecord::Base.connection
@@ -172,17 +179,6 @@ class JdbcConnectionTest < Test::Unit::TestCase
         assert config = ActiveRecord::Base.connection.config
         assert_instance_of ActiveRecord::ConnectionAdapters::JdbcDriver, config[:driver_instance]
         assert_equal 'org.apache.derby.jdbc.EmbeddedDriver', config[:driver_instance].name
-      end
-    end
-    
-    private
-
-    def with_connection_removed
-      connection = ActiveRecord::Base.remove_connection
-      begin
-        yield
-      ensure
-        ActiveRecord::Base.establish_connection connection
       end
     end
 

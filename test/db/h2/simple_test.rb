@@ -6,6 +6,13 @@ class H2SimpleTest < Test::Unit::TestCase
   include ExplainSupportTestMethods if ar_version("3.1")
   include ActiveRecord3TestMethods
   include CustomSelectTestMethods
+
+  test 'returns correct visitor type' do
+    assert_not_nil visitor = connection.instance_variable_get(:@visitor)
+    assert defined? Arel::Visitors::HSQLDB
+    assert_kind_of Arel::Visitors::HSQLDB, visitor
+  end if ar_version('3.0')
+
 end
 
 class H2HasManyThroughTest < Test::Unit::TestCase
@@ -13,11 +20,11 @@ class H2HasManyThroughTest < Test::Unit::TestCase
 end
 
 class H2SchemaTest < Test::Unit::TestCase
-  
+
   def setup
     @entry_table_name, @user_table_name = Entry.table_name, User.table_name
     @current_schema = ActiveRecord::Base.connection.current_schema
-    
+
     @connection = ActiveRecord::Base.connection
     @connection.execute("create schema s1");
     @connection.execute("set schema s1");
@@ -26,9 +33,9 @@ class H2SchemaTest < Test::Unit::TestCase
     @connection.execute("set schema s2");
     CreateUsers.up
     @connection.execute("set schema public");
-    
+
     Entry.table_name = 's1.entries'; User.table_name = 's2.users'
-    
+
     user = User.create! :login => "something"
     Entry.create! :title => "title", :content => "content", :rating => 123.45, :user => user
   end
@@ -41,16 +48,16 @@ class H2SchemaTest < Test::Unit::TestCase
     @connection.execute("drop schema s1");
     @connection.execute("drop schema s2");
     @connection.execute("set schema public");
-    
+
     Entry.reset_column_information; User.reset_column_information
     Entry.table_name, User.table_name = @entry_table_name, @user_table_name
-    
+
     ActiveRecord::Base.clear_active_connections!
   end
-  
+
   def test_find_in_other_schema
     all = Entry.all(:include => :user)
     assert ! all.empty?, "expected `Entry.all(:include => :user)` to not be empty but was"
   end
-  
+
 end

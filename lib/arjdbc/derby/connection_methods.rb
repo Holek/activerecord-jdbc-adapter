@@ -7,16 +7,11 @@ ArJdbc::ConnectionMethods.module_eval do
     end
 
     config[:url] ||= "jdbc:derby:#{config[:database]};create=true"
-    config[:driver] ||= defined?(::Jdbc::Derby.driver_name) ? ::Jdbc::Derby.driver_name : 'org.apache.derby.jdbc.EmbeddedDriver'
+    config[:driver] ||= defined?(::Jdbc::Derby.driver_name) ?
+      ::Jdbc::Derby.driver_name : 'org.apache.derby.jdbc.EmbeddedDriver'
     config[:adapter_spec] ||= ::ArJdbc::Derby
-    config[:connection_alive_sql] ||= 'SELECT 1 FROM SYS.SYSSCHEMAS FETCH FIRST 1 ROWS ONLY' # FROM clause is mandatory
-    
-    connection = embedded_driver(config)
-    md = connection.jdbc_connection.meta_data
-    if md.database_major_version < 10 || (md.database_major_version == 10 && md.database_minor_version < 5)
-      raise ::ActiveRecord::ConnectionFailed, "Derby adapter requires Derby 10.5 or later"
-    end
-    connection
+
+    embedded_driver(config)
   end
   alias_method :jdbcderby_connection, :derby_connection
 end

@@ -1,3 +1,4 @@
+# -*- encoding : utf-8 -*-
 require 'test_helper'
 require 'simple' # due MigrationSetup
 
@@ -13,16 +14,16 @@ module TransactionTestMethods
     CreateUsers.down
     CreateEntries.down
   end
-  
+
   class Entry2 < ActiveRecord::Base; self.table_name = 'entries' ; end
-  
+
   def setup
     super
     Entry.delete_all
-    config = ActiveRecord::Base.connection.config
-    Entry2.establish_connection config
+    Entry2.establish_connection current_connection_config.dup
+    @supports_savepoints = ActiveRecord::Base.connection.supports_savepoints?
   end
-  
+
   def test_supports_transaction_isolation
     unless ActiveRecord::Base.connection.supports_transaction_isolation?
       omit("transaction isolation not supported")
@@ -31,8 +32,8 @@ module TransactionTestMethods
     assert ActiveRecord::Base.connection.supports_transaction_isolation?(:read_committed)
     assert ActiveRecord::Base.connection.supports_transaction_isolation?(:repeatable_read)
     assert ActiveRecord::Base.connection.supports_transaction_isolation?(:serializable)
-  end
-  
+  end if defined? JRUBY_VERSION
+
   def test_transaction_isolation_read_uncommitted
     # It is impossible to properly test read uncommitted. The SQL standard only
     # specifies what must not happen at a certain level, not what must happen. At
@@ -41,15 +42,15 @@ module TransactionTestMethods
     Entry.transaction(:isolation => :read_uncommitted) do
       assert_equal 0, Entry.count
       Entry2.create
-      assert_equal 1, Entry.count 
+      assert_equal 1, Entry.count
     end
   end if Test::Unit::TestCase.ar_version('4.0')
-  
+
   def test_transaction_isolation_read_committed
     unless ActiveRecord::Base.connection.supports_transaction_isolation?
       omit("transaction isolation not supported")
     end
-    
+
     # We are testing that a dirty read does not happen
     # test "read committed" do
     Entry.transaction(:isolation => :read_committed) do
@@ -62,12 +63,12 @@ module TransactionTestMethods
     end
     assert_equal 1, Entry.count
   end if Test::Unit::TestCase.ar_version('4.0')
-  
+
   def test_transaction_isolation_repeatable_read
     unless ActiveRecord::Base.connection.supports_transaction_isolation?
       omit("transaction isolation not supported")
     end
-    
+
     # We are testing that a non-repeatable read does not happen
     # test "repeatable read" do
     entry = Entry.create(:title => '1234')
@@ -82,7 +83,7 @@ module TransactionTestMethods
     entry.reload
     assert_equal '567', entry.title
   end if Test::Unit::TestCase.ar_version('4.0')
-  
+
 #  def test_transaction_isolation_serializable
 #    # We are testing that a non-serializable sequence of statements will raise
 #    # an error.
@@ -105,5 +106,92 @@ module TransactionTestMethods
 #      end
 #    end
 #  end if Test::Unit::TestCase.ar_version('4.0')
-  
+
+  def test_savepoint
+    omit 'savepoins not supported' unless @supports_savepoints
+    Entry.create! :title => '1'
+    assert_equal 1, Entry.count
+
+    connection = ActiveRecord::Base.connection
+    connection.transaction do
+      begin
+        connection.create_savepoint
+        savepoint_created = true
+
+        Entry.create! :title => '2'
+        Entry.create! :title => '3'
+
+        assert_equal 3, Entry.count
+
+        connection.rollback_to_savepoint
+        assert_equal 1, Entry.count
+      ensure
+        connection.release_savepoint if savepoint_created
+      end
+    end
+  end
+
+  def test_release_savepoint
+    omit 'savepoins not supported' unless @supports_savepoints
+    connection = ActiveRecord::Base.connection
+    connection.transaction do
+      begin
+        connection.create_savepoint 'SP'
+
+        Entry.create! :title => '0'
+
+        connection.release_savepoint 'SP'
+
+        assert_raise do
+          disable_logger { connection.rollback_to_savepoint 'SP' }
+        end
+      ensure
+        disable_logger { connection.release_savepoint 'SP' rescue nil }
+      end
+    end
+  end if defined? JRUBY_VERSION
+
+  def test_named_savepoint
+    omit 'savepoins not supported' unless @supports_savepoints
+    Entry.create! :title => '1'
+    assert_equal 1, Entry.count
+
+    connection = ActiveRecord::Base.connection
+    connection.transaction do
+      savepoints_created = []
+      begin
+        connection.create_savepoint 'SP1'
+        savepoints_created << 'SP1'
+
+        Entry.create! :title => '2'
+        Entry.create! :title => '3'
+
+        assert_equal 3, Entry.count
+
+        connection.create_savepoint 'SP2'
+        savepoints_created << 'SP2'
+
+        Entry.create! :title => '4'
+
+        assert_equal 4, Entry.count
+
+        connection.rollback_to_savepoint
+        assert_equal 3, Entry.count
+
+        connection.create_savepoint 'SP3'
+        savepoints_created << 'SP3'
+
+        Entry.create! :title => '42'
+        assert_equal 4, Entry.count
+
+        connection.rollback_to_savepoint 'SP1'
+        assert_equal 1, Entry.count
+      ensure
+        savepoints_created.reverse.each do |name|
+          disable_logger { connection.release_savepoint(name) rescue nil }
+        end
+      end
+    end
+  end if defined? JRUBY_VERSION
+
 end

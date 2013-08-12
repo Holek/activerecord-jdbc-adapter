@@ -36,6 +36,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.DatabaseMetaData;
+import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -54,7 +55,7 @@ import org.jruby.util.ByteList;
  * @author enebo
  */
 public class SQLite3RubyJdbcConnection extends RubyJdbcConnection {
-    
+
     protected SQLite3RubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
         super(runtime, metaClass);
     }
@@ -72,28 +73,39 @@ public class SQLite3RubyJdbcConnection extends RubyJdbcConnection {
             return new SQLite3RubyJdbcConnection(runtime, klass);
         }
     };
-    
-    @JRubyMethod(name = "last_insert_row_id")
-    public IRubyObject getLastInsertRowId(final ThreadContext context) 
+
+    @JRubyMethod(name = {"last_insert_rowid", "last_insert_id"}, alias = "last_insert_row_id")
+    public IRubyObject last_insert_rowid(final ThreadContext context)
         throws SQLException {
         return withConnection(context, new Callable<IRubyObject>() {
             public IRubyObject call(final Connection connection) throws SQLException {
-                Statement statement = null;
+                Statement statement = null; ResultSet genKeys = null;
                 try {
                     statement = connection.createStatement();
-                    return unmarshalIdResult(context.getRuntime(), statement);
+                    // NOTE: strangely this will work and has been used for quite some time :
+                    //return mapGeneratedKeys(context.getRuntime(), connection, statement, true);
+                    // but we should assume SQLite JDBC will prefer sane API usage eventually :
+                    genKeys = statement.executeQuery("SELECT last_insert_rowid()");
+                    return doMapGeneratedKeys(context.getRuntime(), genKeys, true);
                 }
                 catch (final SQLException e) {
-                    debugMessage(context, "Failed to get generated keys: " + e.getMessage());
+                    debugMessage(context, "failed to get generated keys: " + e.getMessage());
                     throw e;
                 }
-                finally { close(statement); }
+                finally { close(genKeys); close(statement); }
             }
         });
     }
 
+    // NOTE: interestingly it supports getGeneratedKeys but not executeUpdate
+    // + the driver does not report it supports it via the meta-data yet does
     @Override
-    protected Statement createStatement(final ThreadContext context, final Connection connection) 
+    protected boolean supportsGeneratedKeys(final Connection connection) throws SQLException {
+        return true;
+    }
+
+    @Override
+    protected Statement createStatement(final ThreadContext context, final Connection connection)
         throws SQLException {
         final Statement statement = connection.createStatement();
         IRubyObject statementEscapeProcessing = getConfigValue(context, "statement_escape_processing");
@@ -103,32 +115,33 @@ public class SQLite3RubyJdbcConnection extends RubyJdbcConnection {
         // else leave as is by default
         return statement;
     }
-    
+
     @Override
-    protected IRubyObject jdbcToRuby(final Ruby runtime, final int column, int type, final ResultSet resultSet)
+    protected IRubyObject jdbcToRuby(final ThreadContext context,
+        final Ruby runtime, final int column, int type, final ResultSet resultSet)
         throws SQLException {
         // This is rather gross, and only needed because the resultset metadata for SQLite tries to be overly
-        // clever, and returns a type for the column of the "current" row, so an integer value stored in a 
+        // clever, and returns a type for the column of the "current" row, so an integer value stored in a
         // decimal column is returned as Types.INTEGER.  Therefore, if the first row of a resultset was an
         // integer value, all rows of that result set would get truncated.
         if ( resultSet instanceof ResultSetMetaData ) {
             type = ((ResultSetMetaData) resultSet).getColumnType(column);
         }
-        return super.jdbcToRuby(runtime, column, type, resultSet);
+        return super.jdbcToRuby(context, runtime, column, type, resultSet);
     }
-    
+
     @Override
-    protected IRubyObject streamToRuby(
+    protected IRubyObject streamToRuby(final ThreadContext context,
         final Ruby runtime, final ResultSet resultSet, final int column)
         throws SQLException, IOException {
         final byte[] bytes = resultSet.getBytes(column);
         if ( resultSet.wasNull() ) return runtime.getNil();
         return runtime.newString( new ByteList(bytes, false) );
     }
-    
+
     @Override
-    protected RubyArray mapTables(final Ruby runtime, final DatabaseMetaData metaData, 
-            final String catalog, final String schemaPattern, final String tablePattern, 
+    protected RubyArray mapTables(final Ruby runtime, final DatabaseMetaData metaData,
+            final String catalog, final String schemaPattern, final String tablePattern,
             final ResultSet tablesSet) throws SQLException {
         final List<IRubyObject> tables = new ArrayList<IRubyObject>(32);
         while ( tablesSet.next() ) {
@@ -138,5 +151,74 @@ public class SQLite3RubyJdbcConnection extends RubyJdbcConnection {
         }
         return runtime.newArray(tables);
     }
-    
+
+    private static class SavepointStub implements Savepoint {
+
+        @Override
+        public int getSavepointId() throws SQLException {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String getSavepointName() throws SQLException {
+            throw new UnsupportedOperationException();
+        }
+
+    }
+
+    @Override
+    @JRubyMethod(name = "create_savepoint", optional = 1)
+    public IRubyObject create_savepoint(final ThreadContext context, final IRubyObject[] args) {
+        IRubyObject name = args.length > 0 ? args[0] : null;
+        final Connection connection = getConnection(true);
+        try {
+            connection.setAutoCommit(false);
+            // NOTE: JDBC driver does not support setSavepoint(String) :
+            connection.createStatement().execute("SAVEPOINT " + name.toString());
+
+            getSavepoints(context).put(name, new SavepointStub());
+
+            return name;
+        }
+        catch (SQLException e) {
+            return handleException(context, e);
+        }
+    }
+
+    @Override
+    @JRubyMethod(name = "rollback_savepoint", required = 1)
+    public IRubyObject rollback_savepoint(final ThreadContext context, final IRubyObject name) {
+        final Connection connection = getConnection(true);
+        try {
+            if ( getSavepoints(context).get(name) == null ) {
+                throw context.getRuntime().newRuntimeError("could not rollback savepoint: '" + name + "' (not set)");
+            }
+            // NOTE: JDBC driver does not implement rollback(Savepoint) :
+            connection.createStatement().execute("ROLLBACK TO SAVEPOINT " + name.toString());
+
+            return context.getRuntime().getNil();
+        }
+        catch (SQLException e) {
+            return handleException(context, e);
+        }
+    }
+
+    @Override
+    @JRubyMethod(name = "release_savepoint", required = 1)
+    public IRubyObject release_savepoint(final ThreadContext context, final IRubyObject name) {
+        final Connection connection = getConnection(true);
+        try {
+            if ( getSavepoints(context).get(name) == null ) {
+                throw context.getRuntime().newRuntimeError("could not release savepoint: '" + name + "' (not set)");
+            }
+            // NOTE: JDBC driver does not implement release(Savepoint) :
+            connection.createStatement().execute("RELEASE SAVEPOINT " + name.toString());
+
+            return context.getRuntime().getNil();
+        }
+        catch (SQLException e) {
+            return handleException(context, e);
+        }
+    }
+
 }

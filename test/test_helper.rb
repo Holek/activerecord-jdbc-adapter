@@ -1,3 +1,4 @@
+# -*- encoding : utf-8 -*-
 require 'stringio'
 
 begin
@@ -20,7 +21,11 @@ if ENV['COVERAGE']
   puts 'started simplecov'
 end
 
-require 'arjdbc' if defined?(JRUBY_VERSION)
+if defined?(JRUBY_VERSION)
+  require 'arjdbc'
+else # we support running tests against MRI
+  require 'active_record'
+end
 
 puts "Using ActiveRecord::VERSION = #{ActiveRecord::VERSION::STRING}"
 
@@ -28,7 +33,7 @@ puts "Using ActiveRecord::VERSION = #{ActiveRecord::VERSION::STRING}"
 # but level is set to "warn" unless $DEBUG or ENV['DEBUG'] is set :
 require 'logger'
 ActiveRecord::Base.logger = Logger.new($stdout)
-ActiveRecord::Base.logger.level = 
+ActiveRecord::Base.logger.level =
   if level = ENV['LOG_LEVEL']
     level.to_i.to_s == level ? level.to_i : Logger.const_get(level.upcase)
   elsif $DEBUG || ENV['DEBUG']
@@ -43,20 +48,31 @@ rescue LoadError
   puts "ruby-debug missing thus won't be loaded"
 end
 
+def silence_warnings
+  prev, $VERBOSE = $VERBOSE, nil
+  yield
+ensure
+  $VERBOSE = prev
+end
+
+def get_system_property(name)
+  defined?(ENV_JAVA) ? ENV_JAVA[name] : ENV[name]
+end
+
 # assert_queries and SQLCounter taken from rails active_record tests
 class Test::Unit::TestCase
 
   alias skip omit
-  
+
   def self.ar_version(version)
     match = version.match(/(\d+)\.(\d+)(?:\.(\d+))?/)
     ActiveRecord::VERSION::MAJOR > match[1].to_i ||
       (ActiveRecord::VERSION::MAJOR == match[1].to_i &&
        ActiveRecord::VERSION::MINOR >= match[2].to_i)
   end
-  
+
   def ar_version(version); self.class.ar_version(version); end
-  
+
   def with_java_connection(config = nil)
     config ||= ActiveRecord::Base.connection.config
     jdbc_driver = ActiveRecord::ConnectionAdapters::JdbcDriver.new(config[:driver])
@@ -68,17 +84,17 @@ class Test::Unit::TestCase
       java_connection.close rescue nil
     end
   end
-  
+
   def connection
     @connection ||= ActiveRecord::Base.connection
   end
-  
+
   def schema_dump
     strio = StringIO.new
     ActiveRecord::SchemaDumper::dump(connection, strio)
     strio.string
   end
-  
+
   def self.disable_logger(connection, &block)
     raise "need a block" unless block_given?
     return disable_connection_logger(connection, &block) if connection
@@ -98,19 +114,53 @@ class Test::Unit::TestCase
       yield
     ensure
       connection.send(:instance_variable_set, :@logger, logger)
-    end    
+    end
   end
-  
-  def disable_logger(connection, &block)
+
+  def disable_logger(connection = self.connection, &block)
     self.class.disable_logger(connection, &block)
   end
-  
+
   def clear_active_connections!
     ActiveRecord::Base.clear_active_connections!
   end
-  
+
+  def with_connection_removed
+    connection = ActiveRecord::Base.remove_connection
+    begin
+      yield
+    ensure
+      ActiveRecord::Base.establish_connection connection
+    end
+  end
+
+  def with_connection_removed
+    configurations = ActiveRecord::Base.configurations
+    connection_config = current_connection_config
+    # ActiveRecord::Base.connection.disconnect!
+    ActiveRecord::Base.remove_connection
+    begin
+      yield connection_config.dup
+    ensure
+      # ActiveRecord::Base.connection.disconnect!
+      ActiveRecord::Base.remove_connection
+      ActiveRecord::Base.configurations = configurations
+      ActiveRecord::Base.establish_connection connection_config
+    end
+  end
+
+  def self.current_connection_config
+    if ActiveRecord::Base.respond_to?(:connection_config)
+      ActiveRecord::Base.connection_config
+    else
+      ActiveRecord::Base.connection_pool.spec.config
+    end
+  end
+
+  def current_connection_config; self.class.current_connection_config; end
+
   protected
-  
+
   def assert_queries(count, matching = nil)
     if ActiveRecord::SQLCounter.enabled?
       log = ActiveRecord::SQLCounter.log = []
@@ -118,9 +168,9 @@ class Test::Unit::TestCase
         yield
       ensure
         queries = queries = ( matching ? log.select { |s| s =~ matching } : log )
-        assert_equal count, queries.size, 
-          "#{ queries.size } instead of #{ count } queries were executed." + 
-          "#{ queries.size == 0 ? '' : "\nQueries:\n#{queries.join("\n")}" }" 
+        assert_equal count, queries.size,
+          "#{ queries.size } instead of #{ count } queries were executed." +
+          "#{ queries.size == 0 ? '' : "\nQueries:\n#{queries.join("\n")}" }"
       end
     else
       warn "assert_queries skipped as SQLCounter is not enabled"
@@ -143,8 +193,9 @@ class Test::Unit::TestCase
     actual = actual.to_date if actual.is_a?(Time)
     assert_equal(expected.nil? ? nil : expected.to_date, actual)
   end
-  
+
   def assert_time_equal expected, actual
+    assert_not_nil actual, "<#{expected}> but was nil" unless expected.nil?
     actual = actual_in_expected_time_zone(expected, actual)
     [ :hour, :min, :sec ].each do |method|
       assert_equal expected.send(method), actual.send(method), "<#{expected}> but was <#{actual}> (differ at #{method.inspect})"
@@ -155,7 +206,7 @@ class Test::Unit::TestCase
     assert_date_equal expected, actual
     assert_time_equal expected, actual
   end
-  
+
   def assert_timestamp_equal expected, actual
     e_utc = expected.utc; a_utc = actual.utc
     [ :year, :month, :day, :hour, :min, :sec ].each do |method|
@@ -173,7 +224,7 @@ class Test::Unit::TestCase
     actual = actual.to_date if actual.is_a?(Time)
     assert_not_equal(expected.nil? ? nil : expected.to_date, actual)
   end
-  
+
   def assert_time_not_equal expected, actual, msg = nil
     actual = actual_in_expected_time_zone(expected, actual)
     equal = true
@@ -182,21 +233,31 @@ class Test::Unit::TestCase
     end
     assert ! equal, msg || "<#{expected}> to not (time) equal to <#{actual}> but did"
   end
-  
+
   def assert_datetime_not_equal expected, actual
     if date_equal?(expected, actual) && time_equal?(expected, actual)
       assert false, "<#{expected}> to not (datetime) equal to <#{actual}> but did"
     end
   end
-  
+
+  def with_default_timezone(default = nil)
+    prev_tz = ActiveRecord::Base.default_timezone
+    begin
+      ActiveRecord::Base.default_timezone = default
+      yield
+    ensure
+      ActiveRecord::Base.default_timezone = prev_tz
+    end
+  end
+
   private
-  
+
   def date_equal?(expected, actual)
     actual = actual_in_expected_time_zone(expected, actual)
     actual = actual.to_date if actual.is_a?(Time)
     (expected.nil? ? nil : expected.to_date) == actual
   end
-  
+
   def time_equal?(expected, actual)
     actual = actual_in_expected_time_zone(expected, actual)
     equal = true; [ :hour, :min, :sec ].each do |method|
@@ -204,21 +265,20 @@ class Test::Unit::TestCase
     end
     equal
   end
-  
+
   def actual_in_expected_time_zone(expected, actual)
     if actual.respond_to?(:in_time_zone)
       if expected.respond_to?(:time_zone)
         return actual.in_time_zone expected.time_zone
       end
+      expected = expected.to_time if expected.is_a?(DateTime)
       if expected.is_a?(Time) # due AR 2.3
-        #expected = expected.in_time_zone
-        #return actual.in_time_zone expected.time_zone
-        return actual.in_time_zone ActiveSupport::TimeZone[expected.zone]
+        return actual.in_time_zone ActiveSupport::TimeZone[expected.zone] # e.g. 'CET'
       end
     end
     actual
   end
-  
+
 end
 
 module ActiveRecord
@@ -241,7 +301,7 @@ module ActiveRecord
     def self.ignored_sql=(value)
       @@ignored_sql = value || []
     end
-    
+
     # FIXME: this needs to be refactored so specific database can add their own
     # ignored SQL.  This ignored SQL is for Oracle.
     ignored_sql.concat [/^select .*nextval/i,
@@ -253,32 +313,32 @@ module ActiveRecord
     @@log = []
     def self.log; @@log; end
     def self.log=(log); @@log = log;; end
-    
+
     def initialize(ignored_sql = self.class.ignored_sql)
       @ignored_sql = ignored_sql
     end
-    
+
     def call(name, start, finish, message_id, values)
       return if 'CACHE' == values[:name]
-      
+
       sql = values[:sql]
       sql = sql.to_sql unless sql.is_a?(String)
-      
+
       return if @ignored_sql.any? { |x| x =~ sql }
-      
+
       self.class.log << sql
     end
-    
+
     @@enabled = true
     def self.enabled?; @@enabled; end
-    
+
     begin
       require 'active_support/notifications'
       ActiveSupport::Notifications.subscribe('sql.active_record', SQLCounter.new)
     rescue LoadError
       @@enabled = false
     end
-    
+
   end
 end
 
@@ -302,3 +362,5 @@ if ActiveRecord::VERSION::MAJOR == 2 && ActiveRecord::VERSION::MINOR == 3
     end
   end
 end
+
+#Java::JavaUtil::TimeZone.setDefault Java::JavaUtil::TimeZone.getTimeZone('Pacific/Galapagos')

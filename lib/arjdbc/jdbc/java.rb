@@ -4,9 +4,12 @@ require 'arjdbc/jdbc/adapter_java'
 module ActiveRecord
   module ConnectionAdapters
     module Jdbc
-      DriverManager = java.sql.DriverManager
-      Types = java.sql.Types
+      # @private
+      DriverManager = ::Java::JavaSql::DriverManager
+      # @private
+      Types = ::Java::JavaSql::Types
     end
+    # @private JdbcConnectionFactory
     java_import "arjdbc.jdbc.JdbcConnectionFactory"
   end
 end

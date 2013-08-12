@@ -1,23 +1,18 @@
 module ActiveRecord
   module ConnectionAdapters
-    # @note this class is mostly implemented in Java: *RubyJdbcConnection.java*
+    # JDBC (connection) base class, custom adapters we support likely extend
+    # this class. For maximum performance most of this class and the sub-classes
+    # we ship are implemented in Java, check: *RubyJdbcConnection.java*
     class JdbcConnection
 
-      # @native_database_types - setup properly by adapter= versus set_native_database_types.
-      #   This contains type information for the adapter.  Individual adapters can make tweaks
-      #   by defined modify_types
-      #
-      # @native_types - This is the default type settings sans any modifications by the
-      # individual adapter.  My guess is that if we loaded two adapters of different types
-      # then this is used as a base to be tweaked by each adapter to create @native_database_types
-
-      def initialize(config)
-        self.config = config
+      # Initializer implemented in Ruby.
+      # @note second argument is mandatory, only optional for compatibility
+      def initialize(config, adapter = nil)
+        @config = config; @adapter = adapter
         @connection = nil; @jndi = nil
         # @stmts = {} # AR compatibility - statement cache not used
         setup_connection_factory
-        connection # force connection to load (@see RubyJdbcConnection.connection)
-        set_native_database_types # so we can set the native types
+        init_connection # @see RubyJdbcConnection.init_connection
       rescue Java::JavaSql::SQLException => e
         e = e.cause if defined?(NativeException) && e.is_a?(NativeException) # JRuby-1.6.8
         error = e.getMessage || e.getSQLState
@@ -28,46 +23,26 @@ module ActiveRecord
         raise error
       end
 
-      attr_reader :connection_factory, :adapter, :config
-      
+      attr_reader :adapter, :config
+
+      # @deprecated no longer used (pass adapter into #initialize)
       # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#initialize
-      def adapter=(adapter)
-        @adapter = adapter
-        @native_database_types = dup_native_types
-        @adapter.modify_types(@native_database_types)
-        @adapter.config.replace(config)
+      def adapter=(adapter); @adapter = adapter; end
+
+      def native_database_types
+        JdbcTypeConverter.new(supported_data_types).choose_best_types
       end
-      
-      # Duplicate all native types into new hash structure so it can be modified
-      # without destroying original structure.
-      def dup_native_types
-        types = {}
-        @native_types.each_pair do |k, v|
-          types[k] = v.inject({}) do |memo, kv|
-            last = kv.last
-            memo[kv.first] = last.is_a?(Numeric) ? last : (last.dup rescue last)
-            memo
-          end
-        end
-        types
-      end
-      private :dup_native_types
-      
-      def config=(config)
-        @config = config.symbolize_keys
-        # NOTE: JDBC 4.0 drivers support checking if connection isValid
-        # thus no need to @config[:connection_alive_sql] ||= 'SELECT 1'
-        @config[:retry_count] ||= 5
-        @config
-      end
-      
+
+      # @deprecated no longer used - only kept for compatibility
+      def set_native_database_types; end
+
       def jndi?; @jndi; end
       alias_method :jndi_connection?, :jndi?
 
       # Sets the connection factory from the available configuration.
       # @see #setup_jdbc_factory
       # @see #setup_jndi_factory
-      # 
+      #
       # @note this has nothing to do with the configure_connection implemented
       # on some of the concrete adapters (e.g. {#ArJdbc::Postgres})
       def setup_connection_factory
@@ -86,28 +61,26 @@ module ActiveRecord
       protected
 
       def setup_jndi_factory
-        data_source = config[:data_source] || 
+        data_source = config[:data_source] ||
           Java::JavaxNaming::InitialContext.new.lookup(config[:jndi].to_s)
-        
+
         @jndi = true
-        @connection_factory = JdbcConnectionFactory.impl do
-          data_source.connection
-        end
+        self.connection_factory = JdbcConnectionFactory.impl { data_source.connection }
       end
 
       def setup_jdbc_factory
         if ! config[:url] || ( ! config[:driver] && ! config[:driver_instance] )
           raise ::ActiveRecord::ConnectionNotEstablished, "jdbc adapter requires :driver class and :url"
         end
-        
+
         url = jdbc_url
         username = config[:username].to_s
         password = config[:password].to_s
-        jdbc_driver = ( config[:driver_instance] ||= 
+        jdbc_driver = ( config[:driver_instance] ||=
             JdbcDriver.new(config[:driver].to_s, config[:properties]) )
-        
+
         @jndi = false
-        @connection_factory = JdbcConnectionFactory.impl do
+        self.connection_factory = JdbcConnectionFactory.impl do
           jdbc_driver.connection(url, username, password)
         end
       end
@@ -123,7 +96,7 @@ module ActiveRecord
         end
         url
       end
-      
+
     end
   end
 end

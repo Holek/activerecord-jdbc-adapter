@@ -3,23 +3,35 @@ require 'arjdbc/db2/adapter'
 module ArJdbc
   module AS400
     include DB2
-    
-    def self.extended(base); DB2.extended(base); end
-    
-    def self.column_selector
-      [ /as400/i, lambda { |cfg, column| column.extend(::ArJdbc::AS400::Column) } ]
-    end
 
+    # @private
+    def self.extended(adapter); DB2.extended(adapter); end
+
+    # @private
+    def self.initialize!; DB2.initialize!; end
+
+    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
     def self.jdbc_connection_class; DB2.jdbc_connection_class; end
 
-    def self.arel2_visitors(config)
-      visitors = DB2.arel2_visitors(config).dup
-      visitors['as400'] = ::Arel::Visitors::DB2
-      visitors
+    # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
+    def self.arel_visitor_type(config = nil); DB2.arel_visitor_type(config); end
+
+    def self.column_selector
+      [ /as400/i, lambda { |config, column| column.extend(Column) } ]
     end
 
+    # @private
+    Column = DB2::Column
+
+    # Boolean emulation can be disabled using :
+    #
+    #   ArJdbc::AS400.emulate_booleans = false
+    #
+    def self.emulate_booleans; DB2.emulate_booleans; end
+    def self.emulate_booleans=(emulate); DB2.emulate_booleans = emulate; end
+
     ADAPTER_NAME = 'AS400'.freeze
-    
+
     def adapter_name
       ADAPTER_NAME
     end
@@ -35,7 +47,7 @@ module ArJdbc
     end
 
     # @override
-    def rename_column(table_name, column_name, new_column_name) # :nodoc:
+    def rename_column(table_name, column_name, new_column_name)
       raise NotImplementedError, "rename_column is not supported on IBM iSeries"
     end
 
@@ -43,7 +55,7 @@ module ArJdbc
     def execute_table_change(sql, table_name, name = nil)
       execute_and_auto_confirm(sql, name)
     end
-    
+
     # holy moly batman! all this to tell AS400 "yes i am sure"
     def execute_and_auto_confirm(sql, name = nil)
 
@@ -83,21 +95,22 @@ module ArJdbc
         @connection.table_exists?(name, schema) :
           @connection.table_exists?(name)
     end
-    
+
     DRIVER_NAME = 'com.ibm.as400.access.AS400JDBCDriver'.freeze
-    
+
+    # @private
     # @deprecated no longer used
     def as400?
       true
     end
 
     private
-    
+
     # @override
     def db2_schema
       @db2_schema = false unless defined? @db2_schema
       return @db2_schema if @db2_schema != false
-      @db2_schema = 
+      @db2_schema =
         if config[:schema].present?
           config[:schema]
         elsif config[:jndi].present?
@@ -119,6 +132,6 @@ module ArJdbc
           schema
         end
     end
-    
+
   end
 end

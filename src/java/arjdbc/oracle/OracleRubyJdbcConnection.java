@@ -25,11 +25,18 @@
  ***** END LICENSE BLOCK *****/
 package arjdbc.oracle;
 
+import arjdbc.jdbc.Callable;
 import arjdbc.jdbc.RubyJdbcConnection;
+import java.io.IOException;
+import java.io.Reader;
 
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,7 +44,9 @@ import org.jruby.Ruby;
 import org.jruby.RubyArray;
 import org.jruby.RubyClass;
 import org.jruby.RubyString;
+import org.jruby.anno.JRubyMethod;
 import org.jruby.runtime.ObjectAllocator;
+import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
 /**
@@ -45,11 +54,11 @@ import org.jruby.runtime.builtin.IRubyObject;
  * @author nicksieger
  */
 public class OracleRubyJdbcConnection extends RubyJdbcConnection {
-    
+
     protected OracleRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
         super(runtime, metaClass);
     }
-    
+
     public static RubyClass createOracleJdbcConnectionClass(Ruby runtime, RubyClass jdbcConnection) {
         final RubyClass clazz = RubyJdbcConnection.getConnectionAdapters(runtime).
             defineClassUnder("OracleJdbcConnection", jdbcConnection, ORACLE_JDBCCONNECTION_ALLOCATOR);
@@ -62,6 +71,105 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
             return new OracleRubyJdbcConnection(runtime, klass);
         }
     };
+
+    @JRubyMethod(name = "next_sequence_value", required = 1)
+    public IRubyObject next_sequence_value(final ThreadContext context,
+        final IRubyObject sequence) throws SQLException {
+        return withConnection(context, new Callable<IRubyObject>() {
+            public IRubyObject call(final Connection connection) throws SQLException {
+                Statement statement = null; ResultSet valSet = null;
+                try {
+                    statement = connection.createStatement();
+                    valSet = statement.executeQuery("SELECT "+ sequence +".NEXTVAL id FROM dual");
+                    if ( ! valSet.next() ) return context.getRuntime().getNil();
+                    return context.getRuntime().newFixnum( valSet.getLong(1) );
+                }
+                catch (final SQLException e) {
+                    debugMessage(context, "failed to get " + sequence + ".NEXTVAL : " + e.getMessage());
+                    throw e;
+                }
+                finally { close(valSet); close(statement); }
+            }
+        });
+    }
+
+    @Override // NOTE: Invalid column type:
+    // getLong not implemented for class oracle.jdbc.driver.T4CRowidAccessor
+    protected IRubyObject mapGeneratedKey(final Ruby runtime, final ResultSet genKeys)
+        throws SQLException {
+        // NOTE: it's likely a ROWID which we do not care about :
+        final String value = genKeys.getString(1); // "AAAsOjAAFAAABUlAAA"
+        if ( isPositiveInteger(value) ) {
+            return runtime.newFixnum( Long.parseLong(value) );
+        }
+        else {
+            return runtime.getNil();
+        }
+    }
+
+    private static boolean isPositiveInteger(final String value) {
+        for ( int i = 0; i < value.length(); i++ ) {
+            if ( ! Character.isDigit(value.charAt(i)) ) return false;
+        }
+        return true;
+    }
+
+    @Override // resultSet.wasNull() might be falsy for '' treated as null
+    protected IRubyObject stringToRuby(final ThreadContext context,
+        final Ruby runtime, final ResultSet resultSet, final int column)
+        throws SQLException {
+        final String value = resultSet.getString(column);
+        if ( value == null ) return runtime.getNil();
+        return RubyString.newUnicodeString(runtime, value);
+    }
+
+    @Override
+    protected IRubyObject readerToRuby(final ThreadContext context,
+        final Ruby runtime, final ResultSet resultSet, final int column)
+        throws SQLException, IOException {
+        final Reader reader = resultSet.getCharacterStream(column);
+        try {
+            if ( resultSet.wasNull() ) return RubyString.newEmptyString(runtime);
+
+            final int bufSize = streamBufferSize;
+            final StringBuilder string = new StringBuilder(bufSize);
+
+            final char[] buf = new char[ bufSize / 2 ];
+            for (int len = reader.read(buf); len != -1; len = reader.read(buf)) {
+                string.append(buf, 0, len);
+            }
+
+            return RubyString.newUnicodeString(runtime, string.toString());
+        }
+        finally { if ( reader != null ) reader.close(); }
+    }
+
+    @Override // booleans are emulated can not setNull(index, Types.BOOLEAN)
+    protected void setBooleanParameter(final ThreadContext context,
+        final Connection connection, final PreparedStatement statement,
+        final int index, final Object value,
+        final IRubyObject column, final int type) throws SQLException {
+        if ( value instanceof IRubyObject ) {
+            setBooleanParameter(context, connection, statement, index, (IRubyObject) value, column, type);
+        }
+        else {
+            if ( value == null ) statement.setNull(index, Types.TINYINT);
+            else {
+                statement.setBoolean(index, ((Boolean) value).booleanValue());
+            }
+        }
+    }
+
+    @Override // booleans are emulated can not setNull(index, Types.BOOLEAN)
+    protected void setBooleanParameter(final ThreadContext context,
+        final Connection connection, final PreparedStatement statement,
+        final int index, final IRubyObject value,
+        final IRubyObject column, final int type) throws SQLException {
+        if ( value.isNil() ) statement.setNull(index, Types.TINYINT);
+        else {
+            statement.setBoolean(index, value.isTrue());
+        }
+    }
 
     /**
      * Oracle needs this override to reconstruct NUMBER which is different
@@ -81,10 +189,10 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
         final String type = resultSet.getString(TYPE_NAME);
         return formatTypeWithPrecisionAndScale(type, precision, scale);
     }
-    
+
     @Override
-    protected RubyArray mapTables(final Ruby runtime, final DatabaseMetaData metaData, 
-            final String catalog, final String schemaPattern, final String tablePattern, 
+    protected RubyArray mapTables(final Ruby runtime, final DatabaseMetaData metaData,
+            final String catalog, final String schemaPattern, final String tablePattern,
             final ResultSet tablesSet) throws SQLException {
         final List<IRubyObject> tables = new ArrayList<IRubyObject>(32);
         while ( tablesSet.next() ) {
@@ -96,5 +204,5 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
         }
         return runtime.newArray(tables);
     }
-    
+
 }

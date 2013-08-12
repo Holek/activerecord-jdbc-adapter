@@ -1,6 +1,6 @@
 require 'test_helper'
 
-config = { :adapter => "db2" }
+config = { }
 
 config[:host] = ENV['DB2HOST'] if ENV['DB2HOST']
 config[:port] = ENV['DB2PORT'] if ENV['DB2PORT']
@@ -24,18 +24,27 @@ unless config[:url]
   end
 end
 
+config[:prepared_statements] = ENV['PREPARED_STATEMENTS'] || ENV['PS']
+
 require 'jdbc/db2'
 # Download IBM DB2 JCC driver from :
 # https://www-304.ibm.com/support/docview.wss?rs=4020&uid=swg21385217
 # or http://sourceforge.net/projects/jt400/ for AS400
-jdbc_db2 = (config[:url] || '') =~ /\:as400/ ? Jdbc::AS400 : Jdbc::DB2
+if (config[:url] || '') =~ /\:as400/
+  config[:adapter] = 'as400'
+  jdbc_db2 = Jdbc::AS400
+else
+  config[:adapter] = 'db2'
+  jdbc_db2 = Jdbc::DB2
+end
+
 begin
-  Java::JavaClass.for_name(jdbc_db2.driver_name)
+  silence_warnings { Java::JavaClass.for_name(jdbc_db2.driver_name) }
 rescue NameError
   begin
     jdbc_db2.load_driver
   rescue LoadError => e
-    puts "Please setup a JDBC driver to run the DB2 tests !"
+    warn "Please setup a JDBC driver to run the DB2 tests !"
     raise e
   end
 end

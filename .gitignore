@@ -25,3 +25,5 @@ test*.db
 test/jars/*.jar
 jndi_test/jdbc/.bindings
 .disable-appraisal-hint
+.yardoc
+.bundle/config

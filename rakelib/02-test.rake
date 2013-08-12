@@ -35,7 +35,7 @@ task 'test_appraisal_hint' do
   next if File.exists?('.disable-appraisal-hint')
   unless (ENV['BUNDLE_GEMFILE'] rescue '') =~ /gemfiles\/.*?\.gemfile/
     appraisals = []; Appraisal::File.each { |file| appraisals << file.name }
-    puts "HINT: specify AR version with `rake appraisal:{version} test_#{adapter}'" +
+    puts "HINT: specify AR version with `rake appraisal:{version} test_{adapter}'" +
          " where version=(#{appraisals.join('|')}) (`touch .disable-appraisal-hint' to disable)"
   end
 end
@@ -46,7 +46,7 @@ def test_task_for(adapter, options = {})
   desc = options[:desc] || options[:comment] ||
     "Run tests against #{options[:database_name] || adapter}"
   adapter = adapter.to_s.downcase
-  driver = options[:driver] || adapter
+  driver = options.key?(:driver) ? options[:driver] : adapter
   prereqs = options[:prereqs] || []
   unless prereqs.frozen?
     prereqs = [ prereqs ].flatten; prereqs << 'test_appraisal_hint'
@@ -61,7 +61,7 @@ def test_task_for(adapter, options = {})
     test_task.libs = []
     if defined?(JRUBY_VERSION)
       test_task.libs << 'lib'
-      test_task.libs << "jdbc-#{driver}/lib" if File.exists?("jdbc-#{driver}/lib")
+      test_task.libs << "jdbc-#{driver}/lib" if driver && File.exists?("jdbc-#{driver}/lib")
       test_task.libs.push *FileList["activerecord-jdbc#{adapter}*/lib"]
     end
     test_task.libs << 'test'
@@ -78,15 +78,18 @@ test_task_for :H2, :desc => 'Run tests against H2 database engine'
 test_task_for :HSQLDB, :desc => 'Run tests against HyperSQL (Java) database'
 test_task_for :MSSQL, :driver => :jtds, :database_name => 'MS-SQL (SQLServer)'
 test_task_for :MySQL, :prereqs => 'db:mysql'
-test_task_for :PostgreSQL, :prereqs => 'db:postgres'
+test_task_for :PostgreSQL, :prereqs => 'db:postgresql', :driver => 'postgres'
 task :test_postgres => :test_postgresql # alias
 task :test_pgsql => :test_postgresql # alias
 test_task_for :SQLite3
+test_task_for :FireBird
 
 # ensure driver for these DBs is on your class-path
 [ :Oracle, :DB2, :Informix, :CacheDB ].each do |adapter|
   test_task_for adapter, :desc => "Run tests against #{adapter} (ensure driver is on class-path)"
 end
+
+#test_task_for :MSSQL, :name => 'test_sqlserver', :driver => nil, :database_name => 'MS-SQL using SQLJDBC'
 
 test_task_for :AS400, :desc => "Run tests against AS400 (DB2) (ensure driver is on class-path)",
   :files => FileList["test/db2*_test.rb"] + FileList["test/db/db2/*_test.rb"]
